@@ -1,0 +1,21 @@
+# Datos / archivos de entrada y salida (privados y pesados)
+*.xlsx
+*.pdf
+*.csv
+*.zip
+
+# Archivos temporales de Excel
+~$*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
