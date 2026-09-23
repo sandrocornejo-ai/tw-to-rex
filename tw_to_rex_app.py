@@ -173,6 +173,9 @@ ALIAS_EMPLEADOS = {
     'Id empresa':          ['Empresa'],
     'Id Afp':              ['AFP'],
     'Id Salud':            ['Isapre'],
+    'Id Mutual':           ['Mutual'],
+    '% Mutual':            ['Tasa Mutual', 'Tasa mutual'],
+    'Id CCAF':             ['CCAF'],
 }
 
 
@@ -197,9 +200,6 @@ def cargar_empleados(file_bytes):
             if nombre in pos:
                 idx[canon] = pos[nombre]
                 break
-    for extra in ('Id Mutual', '% Mutual', 'Id CCAF'):
-        if extra in pos:
-            idx[extra] = pos[extra]
 
     empleados = {}
     for row in it:
