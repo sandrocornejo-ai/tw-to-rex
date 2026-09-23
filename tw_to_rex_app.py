@@ -177,28 +177,42 @@ ALIAS_EMPLEADOS = {
 
 
 def cargar_empleados(file_bytes):
+    """Lee el maestro de empleados fila a fila (streaming) y guarda solo las
+    columnas que usa la app. Evita cargar el Excel completo en memoria, que
+    con listados grandes (~180 mil filas x 189 columnas) colgaba la app."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
     ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
-    headers = [str(h).strip() if h else '' for h in rows[1]]
+    it = ws.iter_rows(values_only=True)
+    next(it, None)                       # fila 1: título
+    headers = [str(h).strip() if h else '' for h in (next(it, None) or [])]
+    pos = {}
+    for i, h in enumerate(headers):      # si hay duplicados, gana el último
+        if h:
+            pos[h] = i
+
+    # columna canónica -> índice de la primera variante que exista
+    idx = {}
+    for canon, alts in ALIAS_EMPLEADOS.items():
+        for nombre in [canon] + alts:
+            if nombre in pos:
+                idx[canon] = pos[nombre]
+                break
+    for extra in ('Id Mutual', '% Mutual', 'Id CCAF'):
+        if extra in pos:
+            idx[extra] = pos[extra]
+
     empleados = {}
-    for row in rows[2:]:
-        if not row[0]:
+    for row in it:
+        if not row or not row[0]:
             continue
-        d = {headers[i]: row[i] for i in range(len(headers))}
-        for canon, alts in ALIAS_EMPLEADOS.items():
-            if d.get(canon) in (None, ''):
-                for a in alts:
-                    if d.get(a) not in (None, ''):
-                        d[canon] = d[a]
-                        break
+        d = {c: (row[i] if i < len(row) else None) for c, i in idx.items()}
         nc = d.get('N° Contrato')
         if isinstance(nc, float) and nc.is_integer():
             d['N° Contrato'] = int(nc)
-        key = str(d.get('Nombre del contrato', '')).strip()
+        key = str(d.get('Nombre del contrato') or '').strip()
         if key:
             empleados[key] = d
+    wb.close()
     return empleados
 
 
