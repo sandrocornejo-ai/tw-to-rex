@@ -163,6 +163,19 @@ def cargar_equivalencias(file_bytes):
     return equiv
 
 
+# Nombres alternativos de columnas en el maestro de empleados
+# (el "Listado de Empleados" de Rex+ usa nombres distintos)
+ALIAS_EMPLEADOS = {
+    'Nombre del contrato': ['Nombre contr.', 'Nombre contrato'],
+    'N° Contrato':         ['Contrato', 'Nº Contrato', 'N° contrato'],
+    'Base contrato':       ['Sueldo Base'],
+    'horasSema':           ['Horas Semanales'],
+    'Id empresa':          ['Empresa'],
+    'Id Afp':              ['AFP'],
+    'Id Salud':            ['Isapre'],
+}
+
+
 def cargar_empleados(file_bytes):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
     ws = wb.active
@@ -174,6 +187,15 @@ def cargar_empleados(file_bytes):
         if not row[0]:
             continue
         d = {headers[i]: row[i] for i in range(len(headers))}
+        for canon, alts in ALIAS_EMPLEADOS.items():
+            if d.get(canon) in (None, ''):
+                for a in alts:
+                    if d.get(a) not in (None, ''):
+                        d[canon] = d[a]
+                        break
+        nc = d.get('N° Contrato')
+        if isinstance(nc, float) and nc.is_integer():
+            d['N° Contrato'] = int(nc)
         key = str(d.get('Nombre del contrato', '')).strip()
         if key:
             empleados[key] = d
