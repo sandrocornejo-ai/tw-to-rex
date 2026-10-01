@@ -290,7 +290,7 @@ def get_cotizacion(concepto, emp, afecto, periodo, desde_ago, sis_tasa,
     if concepto == 'aporteFAPPBAC':
         return aporte_bac
     if concepto == 'totalesEmpl':
-        return afecto   # = suma_afectos
+        return round(afecto)   # = base_afp (topada 83,3 UF), igual al afecto de afp/isapre
     if concepto == 'cesEmpleado':
         return 0.6
     return None
@@ -566,11 +566,11 @@ for fila_n, row in enumerate(tw_data, start=9):
 
     # ── isapre (siempre generar) ───────────────────────────────────
     inst_isapre = get_institucion('isapre', emp, desde_ago)
-    fila('isapre', monto_isapre, base_afp, inst_isapre, base_afp)
+    fila('isapre', monto_isapre, base_afp, inst_isapre, monto_isapre)   # cotización = monto de salud
 
     # ── cesEmpleado (siempre generar) ─────────────────────────────
     inst_ces = get_institucion('cesEmpleado', emp, desde_ago)
-    fila('cesEmpleado', v_seg_ses, base_ces, inst_ces, 0.6)
+    fila('cesEmpleado', v_seg_ses, base_afp, inst_ces, 0.6)   # afecto = mismo que afp
 
     # ── impuesto (siempre generar) ─────────────────────────────────
     v_imp1 = n(safe_val(row, IDX_IMP1))
@@ -626,7 +626,7 @@ for fila_n, row in enumerate(tw_data, start=9):
 
     # ── totalesEmpl (LIQUIDO) ──────────────────────────────────────
     v_liq = n(safe_val(row, IDX_LIQUIDO))
-    cotiz_tot = get_cotizacion('totalesEmpl', emp, suma_afectos_pos, periodo,
+    cotiz_tot = get_cotizacion('totalesEmpl', emp, base_afp, periodo,
                                desde_ago, sis_tasa, aporte_afp, seg_vida, aporte_bac)
     fila('totalesEmpl', v_liq, suma_afectos_pos, None, cotiz_tot)
 

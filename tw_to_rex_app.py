@@ -385,7 +385,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         if concepto == 'aporteFAPPBAC':
             return aporte_bac
         if concepto == 'totalesEmpl':
-            return afecto
+            return round(afecto)   # = base_afp (topada), igual al afecto de afp/isapre
         if concepto == 'cesEmpleado':
             return 0.6
         return None
@@ -613,7 +613,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
 
         # cesEmpleado (siempre)
         inst_ces = get_institucion('cesEmpleado', emp, row, desde_ago)
-        fila('cesEmpleado', v_seg_ses, base_ces, inst_ces, 0.6)
+        fila('cesEmpleado', v_seg_ses, base_afp, inst_ces, 0.6)   # afecto = mismo que afp
 
         # impuesto (siempre)
         v_imp1 = n(safe_val(row, IDX_IMP1))
@@ -666,7 +666,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
 
         # totalesEmpl (LIQUIDO)
         v_liq = n(safe_val(row, IDX_LIQUIDO))
-        cotiz_tot = get_cotizacion('totalesEmpl', emp, suma_afectos_pos, periodo,
+        cotiz_tot = get_cotizacion('totalesEmpl', emp, base_afp, periodo,
                                    desde_ago, sis_tasa, aporte_afp, seg_vida, aporte_bac)
         fila('totalesEmpl', v_liq, suma_afectos_pos, None, cotiz_tot)
 
