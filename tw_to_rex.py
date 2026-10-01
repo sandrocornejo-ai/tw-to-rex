@@ -24,7 +24,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TW_FILE       = os.path.join(BASE_DIR, "tw.xlsx")
 EQUIV_FILE    = os.path.join(BASE_DIR, "Equivalencias Tw.xlsx")
-EMPLEADOS_FILE= os.path.join(BASE_DIR, "empleadostw.xlsx")
+EMPLEADOS_FILE= os.path.join(BASE_DIR, "EmpleadosTW.xlsx")
 PARAMS_FILE   = os.path.join(BASE_DIR, "parametrosMesuales.xlsx")
 COT_AFP_FILE  = os.path.join(BASE_DIR, "cot_afp_hist.xlsx")
 ASIG_FILE     = os.path.join(BASE_DIR, "Asig Inst LD.xlsx")
@@ -153,19 +153,46 @@ wb.close()
 print(f"  Equivalencias: {len(equiv)} filas")
 
 # ── Empleados TW ──
+# Nombres alternativos de columnas (el "Listado de Empleados" de Rex+ usa otros nombres)
+ALIAS_EMPLEADOS = {
+    'Nombre del contrato': ['Nombre contr.', 'Nombre contrato'],
+    'N° Contrato':         ['Contrato', 'Nº Contrato', 'N° contrato'],
+    'Base contrato':       ['Sueldo Base'],
+    'horasSema':           ['Horas Semanales'],
+    'Id empresa':          ['Empresa'],
+    'Id Afp':              ['AFP'],
+    'Id Salud':            ['Isapre'],
+    'Id Mutual':           ['Mutual'],
+    '% Mutual':            ['Tasa Mutual', 'Tasa mutual'],
+    'Id CCAF':             ['CCAF'],
+}
 wb = openpyxl.load_workbook(EMPLEADOS_FILE, data_only=True, read_only=True)
 ws = wb.active
-rows_emp = list(ws.iter_rows(values_only=True))
-wb.close()
-emp_headers = [str(h).strip() if h else '' for h in rows_emp[1]]
-empleados = {}  # Nombre del contrato (str) → dict   [join por FICHA]
-for row in rows_emp[2:]:
-    if not row[0]:
+it = ws.iter_rows(values_only=True)
+next(it, None)                                   # fila 1: título
+emp_headers = [str(h).strip() if h else '' for h in (next(it, None) or [])]
+pos = {h: i for i, h in enumerate(emp_headers) if h}
+idx_emp = {}
+for canon, alts in ALIAS_EMPLEADOS.items():
+    for nombre in [canon] + alts:
+        if nombre in pos:
+            idx_emp[canon] = pos[nombre]
+            break
+faltan = [c for c in ('Nombre del contrato', 'N° Contrato') if c not in idx_emp]
+if faltan:
+    print(f"  ⚠ Columnas no encontradas en empleados: {faltan}")
+empleados = {}  # Nombre del contrato (= FICHA) → dict
+for row in it:
+    if not row or not row[0]:
         continue
-    d = {emp_headers[i]: row[i] for i in range(len(emp_headers))}
-    key = str(d.get('Nombre del contrato', '')).strip()
+    d = {c: (row[i] if i < len(row) else None) for c, i in idx_emp.items()}
+    nc = d.get('N° Contrato')
+    if isinstance(nc, float) and nc.is_integer():
+        d['N° Contrato'] = int(nc)
+    key = str(d.get('Nombre del contrato') or '').strip()
     if key:
         empleados[key] = d
+wb.close()
 print(f"  Empleados cargados: {len(empleados)}")
 
 # ── Parámetros Mensuales ──

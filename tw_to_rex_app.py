@@ -260,8 +260,19 @@ def cargar_asig(file_bytes):
 
 
 def cargar_tw(file_bytes):
+    """Lee la hoja de liquidaciones de TW. No depende de la hoja activa:
+    busca la hoja cuya fila 2 contiene el período ("Mes a procesar: ...")
+    o cuyo encabezado incluye FICHA; si no encuentra ninguna, usa la activa."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    ws = wb.active
+    ws_elegida = None
+    for ws in wb.worksheets:
+        cab = list(ws.iter_rows(min_row=1, max_row=8, values_only=True))
+        fila2 = str(cab[1][0]) if len(cab) > 1 and cab[1] else ''
+        tiene_ficha = any(r and 'FICHA' in [str(c).strip() for c in r if c] for r in cab)
+        if parsear_periodo(fila2) or tiene_ficha:
+            ws_elegida = ws
+            break
+    ws = ws_elegida or wb.active
     rows = list(ws.iter_rows(values_only=True))
     wb.close()
     return rows
