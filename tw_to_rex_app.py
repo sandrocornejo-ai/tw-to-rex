@@ -837,6 +837,8 @@ if st.button("▶️ Generar archivo de entrada", type="primary", disabled=not l
             for p in sorted((p for p in meses if p < mes_proc), reverse=True):
                 st.write(f"Leyendo {isl.nombre_periodo(p)}…")
                 previos.append(_mes(meses[p].getvalue(), haberes))
+            sin_listado = [(f, d['rut']) for f, d in actual['fichas'].items()
+                           if f not in contratos]
             st.write("Calculando imponibles sin licencia…")
             resultados, adv = isl.calcular(actual, previos, topes, contratos)
             st.write("Insertando columnas…")
@@ -845,7 +847,9 @@ if st.button("▶️ Generar archivo de entrada", type="primary", disabled=not l
             stt.update(label="Etapa 1 lista", state="complete", expanded=False)
         st.session_state['e1'] = {
             'periodo': mes_proc, 'mes_bytes': mes_bytes, 'resultados': resultados,
-            'advertencias': adv, 'entrada': entrada, 'manuales': 0,
+            'advertencias': [a for a in adv if 'no encontrada en el listado' not in a],
+            'sin_listado': sin_listado, 'n_fichas': len(actual['fichas']),
+            'entrada': entrada, 'manuales': 0,
         }
         st.session_state.pop('e2', None)
     except Exception as e:
@@ -858,6 +862,19 @@ e1 = st.session_state.get('e1')
 if e1:
     res = e1['resultados']
     no_enc = [r for r in res if r['imp'] is None]
+    sin_listado = e1.get('sin_listado', [])
+    if sin_listado:
+        st.error(
+            f"⚠️ **{len(sin_listado):,} de {e1['n_fichas']:,} fichas de ".replace(',', '.') +
+            f"{isl.nombre_periodo(e1['periodo'])} no están en el listado de empleados.** "
+            "Revisa que EmpleadosTW esté actualizado: estas fichas quedan sin contrato ni "
+            "sueldo base, y la Etapa 2 las informará como advertencias.")
+        with st.expander(f"Ver fichas que no están en el listado ({len(sin_listado)})"):
+            st.dataframe([{'FICHA': f, 'RUT': r} for f, r in sin_listado],
+                         hide_index=True, width='stretch')
+    else:
+        st.caption(f"✅ Las {e1['n_fichas']:,} fichas del mes están en el listado de empleados."
+                   .replace(',', '.'))
     m1, m2, m3 = st.columns(3)
     m1.metric("Fichas con licencia", len(res))
     m2.metric("Imponible encontrado", len(res) - len(no_enc))
@@ -877,7 +894,7 @@ if e1:
                 column_config={'IMPONIBLE': st.column_config.NumberColumn(
                     'IMPONIBLE', min_value=0, step=1, format="%d")},
                 disabled=['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA', 'SUELDO BASE'],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width='stretch',
                 key=f"editor_{e1['periodo']}")
             manual = {f['FICHA']: f['IMPONIBLE'] for f in editado
                       if f.get('IMPONIBLE') not in (None, '')}
