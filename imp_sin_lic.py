@@ -15,7 +15,8 @@ Salidas:
   * Copia del archivo de entrada con la columna IMP SIN LIC insertada
     inmediatamente a la derecha de DIAS LICENCIA (cero por defecto).
   * Informe ImpSinLic<MES AAAA>.xlsx con RUT, FICHA, CONTRATO,
-    ULT IMP SIN LIC e IMP IMP SIS = (ULT IMP SIN LIC / 30) * DIAS LICENCIA.
+    ULT IMP SIN LIC e IMP IMP SIS = (ULT IMP SIN LIC / 30) * DIAS LICENCIA
+    (DIAS LICENCIA limitado a 30).
 
 Uso por línea de comandos (sin ingreso manual):
     python imp_sin_lic.py "JULIO 2026.xlsx"
@@ -238,8 +239,14 @@ def calcular(mes_actual, meses_previos, topes, contratos):
     return resultados, advertencias
 
 
+MAX_DIAS_SIS = 30
+
+
 def imp_imp_sis(imp, dias_lic):
-    return round(imp / 30 * dias_lic) if isinstance(imp, (int, float)) else None
+    """(imp / 30) * DIAS LICENCIA, con DIAS LICENCIA limitado a 30."""
+    if not isinstance(imp, (int, float)):
+        return None
+    return round(imp / 30 * min(dias_lic, MAX_DIAS_SIS))
 
 
 # ─────────────────────────────────────────────────────────────────
