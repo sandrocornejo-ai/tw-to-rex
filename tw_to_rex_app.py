@@ -868,13 +868,15 @@ if e1:
     if no_enc:
         with st.expander(f"✍️ Ingresar imponibles faltantes ({len(no_enc)})", expanded=True):
             st.caption("No hay un mes sin licencia para estas fichas. Ingresa el imponible "
-                       f"si lo tienes; si lo dejas vacío quedará **{isl.NO_ENCONTRADO}**.")
+                       f"si lo tienes; si lo dejas vacío quedará **{isl.NO_ENCONTRADO}** "
+                       "e IMP SL SIS se calculará con el Sueldo Base.")
             editado = st.data_editor(
                 [{'RUT': r['rut'], 'FICHA': r['ficha'], 'CONTRATO': r['contrato'],
-                  'DIAS LICENCIA': r['dias_lic'], 'IMPONIBLE': None} for r in no_enc],
+                  'DIAS LICENCIA': r['dias_lic'], 'SUELDO BASE': round(r.get('sueldo_base') or 0),
+                  'IMPONIBLE': None} for r in no_enc],
                 column_config={'IMPONIBLE': st.column_config.NumberColumn(
                     'IMPONIBLE', min_value=0, step=1, format="%d")},
-                disabled=['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA'],
+                disabled=['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA', 'SUELDO BASE'],
                 hide_index=True, use_container_width=True,
                 key=f"editor_{e1['periodo']}")
             manual = {f['FICHA']: f['IMPONIBLE'] for f in editado

@@ -26,7 +26,8 @@ Luego abre el navegador en `http://localhost:8501` y sigue las instrucciones de 
    - `IMP SIN LIC`: si hay licencia, imponible del último mes anterior sin licencia
      = menor entre la suma de haberes afectos y `topeImp_pesos_afp` de ese mes (0 si no hay licencia).
    - `IMP SL SIS` = (IMP SIN LIC / 30) × DIAS LICENCIA (máximo 30 días).
-   Si no hay mes sin licencia se puede ingresar el imponible a mano; si no, queda "Imp no encontrado".
+   Si no hay mes sin licencia se puede ingresar el imponible a mano; si no, IMP SIN LIC queda
+   "Imp no encontrado" e IMP SL SIS = (Sueldo Base del listado de empleados / 30) × DIAS LICENCIA (máx. 30).
    Descargas: `<MES AAAA> IMP SIN LIC.xlsx` e informe `ImpSinLic <MES AAAA>.xlsx` (RUT, FICHA, CONTRATO, DIAS LICENCIA, ULT IMP SIN LIC, IMP IMP SIS).
 3. **Etapa 2 — Archivo de salida:** transforma el archivo de la Etapa 1 al formato Rex+.
 

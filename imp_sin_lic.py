@@ -9,7 +9,8 @@ Equivalencias Tw.xlsx) y toma el menor entre esa suma y el
 topeImp_pesos_afp del mes encontrado (parametrosMesuales.xlsx).
 
 Si no encuentra ningún mes sin licencia, el imponible puede ingresarse a
-mano; si no se ingresa, queda "Imp no encontrado".
+mano; si no se ingresa, queda "Imp no encontrado" y el SIS se calcula con
+el Sueldo Base del listado de empleados.
 
 Salidas:
   * Copia del archivo de entrada con la columna IMP SIN LIC insertada
@@ -151,7 +152,7 @@ def cargar_topes(params_fuente):
 
 
 def cargar_contratos(emp_fuente):
-    """{FICHA ('Nombre del contrato'): número de contrato ('Contrato')}"""
+    """{FICHA ('Nombre del contrato'): {'contrato': 'Contrato', 'sueldo_base': 'Sueldo Base'}}"""
     wb = _wb(emp_fuente)
     ws = wb.worksheets[0]
     it = ws.iter_rows(values_only=True)
@@ -161,6 +162,7 @@ def cargar_contratos(emp_fuente):
                                         'Nombre contrato') if c in hdr)
     i_con = next(hdr.index(c) for c in ('Contrato', 'N° Contrato', 'Nº Contrato',
                                         'N° contrato') if c in hdr)
+    i_sb = next((hdr.index(c) for c in ('Sueldo Base', 'Base contrato') if c in hdr), None)
     contratos = {}
     for r in it:
         if not r or r[i_fic] is None:
@@ -168,7 +170,8 @@ def cargar_contratos(emp_fuente):
         c = r[i_con]
         if isinstance(c, float) and c.is_integer():
             c = int(c)
-        contratos[str(r[i_fic]).strip()] = c
+        sb = n(r[i_sb]) if i_sb is not None and i_sb < len(r) else 0.0
+        contratos[str(r[i_fic]).strip()] = {'contrato': c, 'sueldo_base': sb}
     wb.close()
     return contratos
 
@@ -220,7 +223,9 @@ def calcular(mes_actual, meses_previos, topes, contratos):
     for ficha, d in mes_actual['fichas'].items():
         if d['dias_lic'] <= 0:
             continue
-        res = {'rut': d['rut'], 'ficha': ficha, 'contrato': contratos.get(ficha, ''),
+        emp = contratos.get(ficha) or {}
+        res = {'rut': d['rut'], 'ficha': ficha, 'contrato': emp.get('contrato', ''),
+               'sueldo_base': emp.get('sueldo_base', 0.0),
                'dias_lic': d['dias_lic'], 'imp': None, 'mes_origen': None,
                'suma_afectos': None, 'tope': None}
         if ficha not in contratos:
@@ -244,6 +249,17 @@ def calcular(mes_actual, meses_previos, topes, contratos):
 MAX_DIAS_SIS = 30
 
 
+def sis_final(r, imp):
+    """IMP SL SIS / IMP IMP SIS de un resultado.
+    Con imponible: (imponible / 30) * min(DIAS LICENCIA, 30).
+    Con 'Imp no encontrado': (Sueldo Base del listado de empleados / 30)
+    * min(DIAS LICENCIA, 30). Sin sueldo base: 'Imp no encontrado'."""
+    v = imp_imp_sis(imp, r['dias_lic'])
+    if v is None and n(r.get('sueldo_base')) > 0:
+        v = imp_imp_sis(n(r['sueldo_base']), r['dias_lic'])
+    return NO_ENCONTRADO if v is None else v
+
+
 def imp_imp_sis(imp, dias_lic):
     """(imp / 30) * DIAS LICENCIA, con DIAS LICENCIA limitado a 30."""
     if not isinstance(imp, (int, float)):
@@ -260,7 +276,9 @@ def generar_entrada_con_columna(fuente, resultados, imp_manual=None):
     derecha de DIAS LICENCIA:
       IMP SIN LIC = imponible del último mes sin licencia (0 si no hay licencia)
       IMP SL SIS  = (IMP SIN LIC / 30) * min(DIAS LICENCIA, 30)
-    Las fichas con licencia sin imponible quedan con 'Imp no encontrado'."""
+    Las fichas con licencia sin imponible quedan con 'Imp no encontrado' en
+    IMP SIN LIC, e IMP SL SIS se calcula con el Sueldo Base del listado de
+    empleados: (Sueldo Base / 30) * min(DIAS LICENCIA, 30)."""
     imp_manual = imp_manual or {}
     por_ficha = {r['ficha']: r for r in resultados}
 
@@ -296,8 +314,7 @@ def generar_entrada_con_columna(fuente, resultados, imp_manual=None):
             imp, sis = 0, 0
         else:
             imp = imp_final(res, imp_manual)
-            sis = imp_imp_sis(imp, res['dias_lic'])
-            sis = NO_ENCONTRADO if sis is None else sis
+            sis = sis_final(res, imp)
         for col, v in ((col_imp, imp), (col_sis, sis)):
             c = ws.cell(r, col, v)
             if isinstance(v, (int, float)):
@@ -320,10 +337,9 @@ def generar_informe(resultados, imp_manual=None):
         c.fill = PatternFill('solid', fgColor='1E5591')
     for r in resultados:
         imp = imp_final(r, imp_manual)
-        sis = imp_imp_sis(imp, r['dias_lic'])
+        sis = sis_final(r, imp)
         dias = int(r['dias_lic']) if float(r['dias_lic']).is_integer() else r['dias_lic']
-        ws.append([r['rut'], r['ficha'], r['contrato'], dias, imp,
-                   sis if sis is not None else NO_ENCONTRADO])
+        ws.append([r['rut'], r['ficha'], r['contrato'], dias, imp, sis])
     for fila in ws.iter_rows(min_row=2, min_col=5, max_col=6):
         for c in fila:
             if isinstance(c.value, (int, float)):
