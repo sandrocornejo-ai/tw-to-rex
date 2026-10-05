@@ -16,13 +16,30 @@ streamlit run tw_to_rex_app.py
 
 Luego abre el navegador en `http://localhost:8501` y sigue las instrucciones de la interfaz.
 
+## Flujo (una sola pantalla)
+
+1. **Archivos:** arrastra todos los archivos juntos. La app reconoce cada uno:
+   los meses de TeamWork (por "Mes a procesar" en la fila 2), `Equivalencias Tw.xlsx`,
+   `parametrosMesuales.xlsx`, `cot_afp_hist.xlsx`, `EmpleadosTW.xlsx` y `Asig Inst LD.xlsx`
+   (opcional). El mes a procesar es el más reciente (se puede cambiar).
+2. **Etapa 1 — Archivo de entrada:** inserta junto a `DIAS LICENCIA` las columnas
+   - `IMP SIN LIC`: si hay licencia, imponible del último mes anterior sin licencia
+     = menor entre la suma de haberes afectos y `topeImp_pesos_afp` de ese mes (0 si no hay licencia).
+   - `IMP SL SIS` = (IMP SIN LIC / 30) × DIAS LICENCIA (máximo 30 días).
+   Si no hay mes sin licencia se puede ingresar el imponible a mano; si no, queda "Imp no encontrado".
+   Descargas: `<MES AAAA> IMP SIN LIC.xlsx` e informe `ImpSinLic <MES AAAA>.xlsx`.
+3. **Etapa 2 — Archivo de salida:** transforma el archivo de la Etapa 1 al formato Rex+.
+
 ## Archivos necesarios
 
 | Archivo | Descripción |
 |---|---|
-| `tw.xlsx` | Exportación de liquidaciones desde TeamWork |
+| `<MES AAAA>.xlsx` | Exportación mensual de TeamWork (mes a procesar y meses anteriores) |
 | `Equivalencias Tw.xlsx` | Mapeo de conceptos TW → Rex+ |
-| `parametrosMensuales.xlsx` | UF, tope AFP, cotizaciones del mes |
+| `parametrosMesuales.xlsx` | UF, tope AFP, cotizaciones del mes |
+| `cot_afp_hist.xlsx` | Cotizaciones AFP históricas |
+| `EmpleadosTW.xlsx` | Listado de empleados (FICHA → contrato) |
+| `Asig Inst LD.xlsx` | Instituciones por concepto (opcional) |
 
 ## Archivos de salida
 

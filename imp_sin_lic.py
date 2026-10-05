@@ -35,6 +35,7 @@ from openpyxl.styles import Font, PatternFill
 
 COL_DIAS_LIC   = 'DIAS LICENCIA'
 COL_NUEVA      = 'IMP SIN LIC'
+COL_SIS        = 'IMP SL SIS'
 NO_ENCONTRADO  = 'Imp no encontrado'
 FILA_ENCABEZADO = 8          # en el archivo mensual de TW
 
@@ -253,37 +254,53 @@ def imp_imp_sis(imp, dias_lic):
 #  Archivos de salida
 # ─────────────────────────────────────────────────────────────────
 
-def generar_entrada_con_columna(fuente, valores):
-    """Copia del archivo mensual con IMP SIN LIC a la derecha de DIAS LICENCIA.
-    valores: {FICHA: monto | 'Imp no encontrado'}; el resto queda en 0."""
+def generar_entrada_con_columna(fuente, resultados, imp_manual=None):
+    """Copia del archivo mensual con dos columnas nuevas inmediatamente a la
+    derecha de DIAS LICENCIA:
+      IMP SIN LIC = imponible del último mes sin licencia (0 si no hay licencia)
+      IMP SL SIS  = (IMP SIN LIC / 30) * min(DIAS LICENCIA, 30)
+    Las fichas con licencia sin imponible quedan con 'Imp no encontrado'."""
+    imp_manual = imp_manual or {}
+    por_ficha = {r['ficha']: r for r in resultados}
+
     wb = _wb(fuente, read_only=False)
     ws = _hoja_tw(wb)
     hdr = [str(c.value).strip() if c.value is not None else ''
            for c in ws[FILA_ENCABEZADO]]
     col_lic = hdr.index(COL_DIAS_LIC) + 1          # 1-based
     col_fic = hdr.index('FICHA') + 1
-    col_new = col_lic + 1
+    col_imp, col_sis = col_lic + 1, col_lic + 2
 
-    ws.insert_cols(col_new)
-    # insertar columna no corre las celdas combinadas que están a la derecha
+    ws.insert_cols(col_imp, amount=2)
+    # insertar columnas no corre las celdas combinadas que están a la derecha
     for rango in list(ws.merged_cells.ranges):
-        if rango.min_col >= col_new:
-            rango.shift(col_shift=1)
+        if rango.min_col >= col_imp:
+            rango.shift(col_shift=2)
 
-    enc = ws.cell(FILA_ENCABEZADO, col_new, COL_NUEVA)
     ref = ws.cell(FILA_ENCABEZADO, col_lic)
-    if ref.has_style:
-        enc._style = ref._style
-    ancho = ws.column_dimensions[openpyxl.utils.get_column_letter(col_lic)].width
-    ws.column_dimensions[openpyxl.utils.get_column_letter(col_new)].width = max(ancho or 0, 14)
+    letra = openpyxl.utils.get_column_letter
+    ancho = ws.column_dimensions[letra(col_lic)].width
+    for col, titulo in ((col_imp, COL_NUEVA), (col_sis, COL_SIS)):
+        enc = ws.cell(FILA_ENCABEZADO, col, titulo)
+        if ref.has_style:
+            enc._style = ref._style
+        ws.column_dimensions[letra(col)].width = max(ancho or 0, 14)
 
     for r in range(FILA_ENCABEZADO + 1, ws.max_row + 1):
         ficha = ws.cell(r, col_fic).value
         if ficha in (None, ''):
             continue
-        c = ws.cell(r, col_new, valores.get(str(ficha).strip(), 0))
-        if isinstance(c.value, (int, float)):
-            c.number_format = '#,##0'
+        res = por_ficha.get(str(ficha).strip())
+        if res is None:
+            imp, sis = 0, 0
+        else:
+            imp = imp_final(res, imp_manual)
+            sis = imp_imp_sis(imp, res['dias_lic'])
+            sis = NO_ENCONTRADO if sis is None else sis
+        for col, v in ((col_imp, imp), (col_sis, sis)):
+            c = ws.cell(r, col, v)
+            if isinstance(v, (int, float)):
+                c.number_format = '#,##0'
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -327,8 +344,44 @@ def imp_final(r, imp_manual=None):
     return NO_ENCONTRADO
 
 
-def valores_columna(resultados, imp_manual=None):
-    return {r['ficha']: imp_final(r, imp_manual) for r in resultados}
+# ─────────────────────────────────────────────────────────────────
+#  Reconocimiento automático de los archivos cargados
+# ─────────────────────────────────────────────────────────────────
+
+TIPOS_POR_NOMBRE = [            # (tipo, fragmentos del nombre en minúsculas)
+    ('salida', ('imp sin lic', 'impsinlic', 'salida_rex')),   # resultados previos: se ignoran
+    ('equiv',  ('equivalencia',)),
+    ('params', ('parametro',)),
+    ('cot',    ('cot_afp', 'cot afp', 'cotafp')),
+    ('asig',   ('asig inst', 'asig_inst', 'asiginst')),
+    ('emp',    ('emplead',)),
+]
+
+
+def periodo_de_archivo(fuente):
+    """Período ('AAAA-MM') de un archivo mensual de TW, o None si no lo es."""
+    try:
+        wb = _wb(fuente)
+        for ws in wb.worksheets:
+            cab = list(ws.iter_rows(min_row=1, max_row=2, values_only=True))
+            if len(cab) > 1 and cab[1]:
+                p = parsear_periodo(cab[1][0]) if 'MES A PROCESAR' in \
+                    str(cab[1][0] or '').upper() else None
+                if p:
+                    wb.close()
+                    return p
+        wb.close()
+    except Exception:
+        pass
+    return None
+
+
+def tipo_por_nombre(nombre):
+    base = os.path.basename(nombre).lower()
+    for tipo, frags in TIPOS_POR_NOMBRE:
+        if any(f in base for f in frags):
+            return tipo
+    return None
 
 
 def nombre_informe(periodo):
@@ -378,14 +431,13 @@ def main(ruta_mes):
     for a in adv:
         print("  ⚠", a)
 
-    vals = valores_columna(resultados)
     salida_ent = os.path.join(carpeta, nombre_entrada(actual['periodo']))
     salida_inf = os.path.join(carpeta, nombre_informe(actual['periodo']))
     with open(salida_inf, 'wb') as f:
         f.write(generar_informe(resultados))
-    print("Generando copia con IMP SIN LIC…")
+    print("Generando copia con IMP SIN LIC / IMP SL SIS…")
     with open(salida_ent, 'wb') as f:
-        f.write(generar_entrada_con_columna(ruta_mes, vals))
+        f.write(generar_entrada_con_columna(ruta_mes, resultados))
 
     nf = sum(1 for r in resultados if r['imp'] is None)
     print(f"Con licencia: {len(resultados)} | encontrados: {len(resultados) - nf} "

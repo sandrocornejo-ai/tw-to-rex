@@ -711,285 +711,255 @@ def generar_excel(output_rows):
 
 
 # ─────────────────────────────────────────────────────────────────
-#  PESTAÑA: IMPONIBLE SIN LICENCIA
+#  INTERFAZ STREAMLIT — proceso único en dos etapas
 # ─────────────────────────────────────────────────────────────────
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-
-@st.cache_data(show_spinner=False)
-def _isl_haberes(equiv_bytes):
-    return isl.cargar_haberes_afectos(equiv_bytes)
-
-
-@st.cache_data(show_spinner=False)
-def _isl_topes(params_bytes):
-    return isl.cargar_topes(params_bytes)
-
-
-@st.cache_data(show_spinner=False)
-def _isl_contratos(emp_bytes):
-    return isl.cargar_contratos(emp_bytes)
+ETIQUETAS = {
+    'equiv':  "Equivalencias Tw.xlsx",
+    'params': "parametrosMesuales.xlsx",
+    'cot':    "cot_afp_hist.xlsx",
+    'emp':    "EmpleadosTW.xlsx",
+    'asig':   "Asig Inst LD.xlsx (opcional)",
+}
+OBLIGATORIOS = ('equiv', 'params', 'cot', 'emp')
 
 
 @st.cache_data(show_spinner=False)
-def _isl_mes(mes_bytes, haberes):
-    return isl.leer_mes(mes_bytes, set(haberes))
+def _periodo(nombre, datos):
+    return isl.periodo_de_archivo(datos)
 
 
-def render_imp_sin_lic():
-    st.markdown(
-        "Agrega la columna **IMP SIN LIC** junto a **DIAS LICENCIA**. Para cada ficha "
-        "con licencia busca hacia atrás el último mes sin licencia y toma el menor entre "
-        "la suma de haberes afectos y el `topeImp_pesos_afp` de ese mes."
-    )
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Meses")
-        mes_file = st.file_uploader("📄 Mes a procesar  *(ej. JULIO 2026.xlsx)*",
-                                    type=["xlsx"], key="isl_mes")
-        prev_files = st.file_uploader("🗂️ Meses anteriores  *(puedes subir varios)*",
-                                      type=["xlsx"], key="isl_prev",
-                                      accept_multiple_files=True)
-    with c2:
-        st.subheader("Referencias")
-        equiv_file  = st.file_uploader("🔄 Equivalencias Tw.xlsx", type=["xlsx"], key="isl_equiv")
-        params_file = st.file_uploader("⚙️ parametrosMesuales.xlsx", type=["xlsx"], key="isl_params")
-        emp_file    = st.file_uploader("👥 EmpleadosTW.xlsx", type=["xlsx"], key="isl_emp")
-
-    listos = all([mes_file, prev_files, equiv_file, params_file, emp_file])
-    if not listos:
-        st.info("Carga el mes a procesar, al menos un mes anterior, Equivalencias, "
-                "parámetros y el listado de empleados.")
-
-    if st.button("🔎 Calcular imponibles", type="primary", disabled=not listos, key="isl_calc"):
-        try:
-            with st.status("Calculando…", expanded=True) as stt:
-                st.write("Cargando referencias…")
-                haberes   = sorted(_isl_haberes(equiv_file.getvalue()))
-                topes     = _isl_topes(params_file.getvalue())
-                contratos = _isl_contratos(emp_file.getvalue())
-                st.write(f"Leyendo {mes_file.name}…")
-                actual = _isl_mes(mes_file.getvalue(), haberes)
-                if not actual['periodo']:
-                    raise ValueError(f"No se detectó el período en {mes_file.name}")
-                previos = []
-                for f in prev_files:
-                    st.write(f"Leyendo {f.name}…")
-                    m = _isl_mes(f.getvalue(), haberes)
-                    if not m['periodo']:
-                        st.warning(f"{f.name}: no se detectó el período, se omite")
-                    elif m['periodo'] >= actual['periodo']:
-                        st.warning(f"{f.name}: no es anterior a "
-                                   f"{isl.nombre_periodo(actual['periodo'])}, se omite")
-                    else:
-                        previos.append(m)
-                resultados, adv = isl.calcular(actual, previos, topes, contratos)
-                stt.update(label="Cálculo listo", state="complete", expanded=False)
-            st.session_state['isl'] = {
-                'periodo': actual['periodo'],
-                'mes_nombre': mes_file.name,
-                'mes_bytes': mes_file.getvalue(),
-                'previos': sorted(m['periodo'] for m in previos),
-                'resultados': resultados,
-                'advertencias': adv,
-            }
-            st.session_state.pop('isl_out', None)
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
-            import traceback
-            with st.expander("Detalle del error"):
-                st.code(traceback.format_exc())
-
-    data = st.session_state.get('isl')
-    if not data:
-        return
-
-    res = data['resultados']
-    no_enc = [r for r in res if r['imp'] is None]
-    nombre = isl.nombre_periodo(data['periodo'])
-
-    st.divider()
-    st.subheader(f"Resultado — {nombre}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Con licencia", len(res))
-    m2.metric("Imponible encontrado", len(res) - len(no_enc))
-    m3.metric("Sin mes sin licencia", len(no_enc))
-    m4.metric("Meses revisados", len(data['previos']))
-    st.caption("Meses anteriores usados: " +
-               ", ".join(isl.nombre_periodo(p) for p in reversed(data['previos'])))
-
-    for a in data['advertencias'][:50]:
-        st.warning(a)
-
-    with st.expander(f"Ver fichas con imponible encontrado ({len(res) - len(no_enc)})"):
-        st.dataframe([{
-            'RUT': r['rut'], 'FICHA': r['ficha'], 'CONTRATO': r['contrato'],
-            'DIAS LICENCIA': r['dias_lic'],
-            'MES ORIGEN': isl.nombre_periodo(r['mes_origen']),
-            'SUMA AFECTOS': round(r['suma_afectos']), 'TOPE': round(r['tope'] or 0),
-            'ULT IMP SIN LIC': int(r['imp']),
-        } for r in res if r['imp'] is not None], hide_index=True, use_container_width=True)
-
-    imp_manual = {}
-    if no_enc:
-        st.markdown(f"#### ✍️ Ingreso manual ({len(no_enc)})")
-        st.caption("No se encontró un mes sin licencia para estas fichas. Ingresa el "
-                   "imponible si lo tienes; si lo dejas vacío quedará "
-                   f"**{isl.NO_ENCONTRADO}**.")
-        editado = st.data_editor(
-            [{'RUT': r['rut'], 'FICHA': r['ficha'], 'CONTRATO': r['contrato'],
-              'DIAS LICENCIA': r['dias_lic'], 'IMPONIBLE': None} for r in no_enc],
-            column_config={
-                'IMPONIBLE': st.column_config.NumberColumn(
-                    'IMPONIBLE', min_value=0, step=1, format="%d"),
-            },
-            disabled=['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA'],
-            hide_index=True, use_container_width=True, key=f"isl_editor_{data['periodo']}",
-        )
-        imp_manual = {fila['FICHA']: fila['IMPONIBLE'] for fila in editado
-                      if fila.get('IMPONIBLE') not in (None, '')}
-
-    if st.button("📦 Generar archivos", type="primary", key="isl_gen"):
-        with st.spinner("Generando archivos… (la copia del mes puede tardar un poco)"):
-            st.session_state['isl_out'] = {
-                'informe': isl.generar_informe(res, imp_manual),
-                'entrada': isl.generar_entrada_con_columna(
-                    data['mes_bytes'], isl.valores_columna(res, imp_manual)),
-                'manuales': len(imp_manual),
-            }
-
-    out = st.session_state.get('isl_out')
-    if out:
-        st.success(f"✅ Archivos generados ({out['manuales']} imponibles ingresados a mano)")
-        d1, d2 = st.columns(2)
-        d1.download_button(f"⬇️ {isl.nombre_informe(data['periodo'])}", out['informe'],
-                           file_name=isl.nombre_informe(data['periodo']),
-                           mime=XLSX_MIME, key="isl_dl_inf")
-        d2.download_button(f"⬇️ {isl.nombre_entrada(data['periodo'])}", out['entrada'],
-                           file_name=isl.nombre_entrada(data['periodo']),
-                           mime=XLSX_MIME, key="isl_dl_ent")
+@st.cache_data(show_spinner=False)
+def _haberes(datos):
+    return sorted(isl.cargar_haberes_afectos(datos))
 
 
-# ─────────────────────────────────────────────────────────────────
-#  INTERFAZ STREAMLIT
-# ─────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def _topes(datos):
+    return isl.cargar_topes(datos)
 
-st.set_page_config(
-    page_title="TeamWork → Rex+",
-    page_icon="💼",
-    layout="wide",
-)
 
+@st.cache_data(show_spinner=False)
+def _contratos(datos):
+    return isl.cargar_contratos(datos)
+
+
+@st.cache_data(show_spinner=False)
+def _mes(datos, haberes):
+    return isl.leer_mes(datos, set(haberes))
+
+
+def clasificar(archivos):
+    """Reconoce cada archivo cargado. Retorna (refs, meses, ignorados)."""
+    refs, meses, ignorados = {}, {}, []
+    for f in archivos:
+        if f.name.startswith('~$'):
+            continue
+        tipo = isl.tipo_por_nombre(f.name)
+        if tipo == 'salida':
+            ignorados.append(f"{f.name} (resultado de un proceso anterior)")
+        elif tipo:
+            refs[tipo] = f
+        else:
+            p = _periodo(f.name, f.getvalue())
+            if p and p in meses:
+                ignorados.append(f"{f.name} (repite {isl.nombre_periodo(p)})")
+            elif p:
+                meses[p] = f
+            else:
+                ignorados.append(f.name)
+    return refs, meses, ignorados
+
+
+st.set_page_config(page_title="TeamWork → Rex+", page_icon="💼", layout="wide")
 st.title("💼 TeamWork → Rex+")
 st.caption("Transforma liquidaciones de TeamWork al formato de importación Rex+")
 
-tab_rex, tab_lic = st.tabs(["🔁 Migración Rex+", "🩺 Imponible sin licencia"])
+# ── Carga de archivos ───────────────────────────────────────────────
+st.subheader("📂 Archivos")
+archivos = st.file_uploader(
+    "Arrastra aquí todos los archivos: los meses de TeamWork (el que vas a procesar y "
+    "los anteriores), Equivalencias, parámetros, cot_afp_hist, empleados y Asig Inst LD.",
+    type=["xlsx"], accept_multiple_files=True, key="archivos")
 
-with tab_lic:
-    render_imp_sin_lic()
+refs, meses, ignorados = clasificar(archivos or [])
+firma = tuple(sorted((f.name, f.size) for f in (archivos or [])))
+if st.session_state.get('firma') != firma:          # cambiaron los archivos
+    for k in ('e1', 'e2'):
+        st.session_state.pop(k, None)
+    st.session_state['firma'] = firma
 
-with tab_rex:
+mes_proc = None
+if archivos:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Referencias**")
+        for tipo, etiqueta in ETIQUETAS.items():
+            f = refs.get(tipo)
+            marca = "✅" if f else ("⚪" if tipo == 'asig' else "❌")
+            st.markdown(f"{marca} {etiqueta}" + (f" — `{f.name}`" if f else ""))
+    with c2:
+        st.markdown("**Meses de TeamWork**")
+        if meses:
+            orden = sorted(meses, reverse=True)
+            mes_proc = st.selectbox("Mes a procesar", orden, index=0,
+                                    format_func=isl.nombre_periodo)
+            ant = [p for p in orden if p < mes_proc]
+            st.caption("Meses anteriores para buscar el imponible: " +
+                       (", ".join(isl.nombre_periodo(p) for p in ant) or "ninguno"))
+        else:
+            st.markdown("❌ Ningún archivo mensual reconocido")
+    if ignorados:
+        st.caption("No reconocidos (se ignoran): " + ", ".join(ignorados))
 
-    st.divider()
+faltan = [ETIQUETAS[t] for t in OBLIGATORIOS if t not in refs]
+if archivos and not meses:
+    faltan.insert(0, "mes a procesar")
+listo = bool(archivos) and not faltan
+if archivos and faltan:
+    st.warning("Faltan: **" + ", ".join(faltan) + "**")
 
-    # ── Columnas para los upload widgets ───────────────────────────────
-    col1, col2 = st.columns(2)
+st.divider()
 
-    with col1:
-        st.subheader("Archivos de datos")
-        tw_file     = st.file_uploader("📄 tw.xlsx  *(nómina principal)*",
-                                       type=["xlsx"], key="tw")
-        emp_file    = st.file_uploader("👥 empleadostw.xlsx  *(maestro de empleados)*",
-                                       type=["xlsx"], key="emp")
-        equiv_file  = st.file_uploader("🔄 Equivalencias Tw.xlsx  *(mapeo de conceptos)*",
-                                       type=["xlsx"], key="equiv")
+# ── ETAPA 1 ─────────────────────────────────────────────────────────
+st.subheader("1️⃣ Etapa 1 — Archivo de entrada")
+st.caption("Calcula el imponible sin licencia y agrega las columnas **IMP SIN LIC** e "
+           "**IMP SL SIS** junto a DIAS LICENCIA.")
 
-    with col2:
-        st.subheader("Archivos de parámetros")
-        params_file = st.file_uploader("⚙️ parametrosMesuales.xlsx  *(topes y tasas)*",
-                                       type=["xlsx"], key="params")
-        cot_file    = st.file_uploader("📊 cot_afp_hist.xlsx  *(cotizaciones AFP)*",
-                                       type=["xlsx"], key="cot")
-        asig_file   = st.file_uploader("🏦 Asig Inst LD.xlsx  *(instituciones por concepto)*",
-                                       type=["xlsx"], key="asig")
+if st.button("▶️ Generar archivo de entrada", type="primary", disabled=not listo):
+    try:
+        with st.status("Etapa 1 en curso…", expanded=True) as stt:
+            st.write("Leyendo referencias…")
+            haberes   = _haberes(refs['equiv'].getvalue())
+            topes     = _topes(refs['params'].getvalue())
+            contratos = _contratos(refs['emp'].getvalue())
+            st.write(f"Leyendo {isl.nombre_periodo(mes_proc)}…")
+            actual = _mes(meses[mes_proc].getvalue(), haberes)
+            previos = []
+            for p in sorted((p for p in meses if p < mes_proc), reverse=True):
+                st.write(f"Leyendo {isl.nombre_periodo(p)}…")
+                previos.append(_mes(meses[p].getvalue(), haberes))
+            st.write("Calculando imponibles sin licencia…")
+            resultados, adv = isl.calcular(actual, previos, topes, contratos)
+            st.write("Insertando columnas…")
+            mes_bytes = meses[mes_proc].getvalue()
+            entrada = isl.generar_entrada_con_columna(mes_bytes, resultados)
+            stt.update(label="Etapa 1 lista", state="complete", expanded=False)
+        st.session_state['e1'] = {
+            'periodo': mes_proc, 'mes_bytes': mes_bytes, 'resultados': resultados,
+            'advertencias': adv, 'entrada': entrada, 'manuales': 0,
+        }
+        st.session_state.pop('e2', None)
+    except Exception as e:
+        st.error(f"❌ Error en la Etapa 1: {e}")
+        import traceback
+        with st.expander("Detalle del error"):
+            st.code(traceback.format_exc())
 
-    st.divider()
+e1 = st.session_state.get('e1')
+if e1:
+    res = e1['resultados']
+    no_enc = [r for r in res if r['imp'] is None]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Fichas con licencia", len(res))
+    m2.metric("Imponible encontrado", len(res) - len(no_enc))
+    m3.metric("Sin imponible", len(no_enc))
+    for a in e1['advertencias'][:50]:
+        st.warning(a)
 
-    # ── Botón Procesar ──────────────────────────────────────────────
-    archivos_ok = all([tw_file, emp_file, equiv_file, params_file, cot_file])
+    if no_enc:
+        with st.expander(f"✍️ Ingresar imponibles faltantes ({len(no_enc)})", expanded=True):
+            st.caption("No hay un mes sin licencia para estas fichas. Ingresa el imponible "
+                       f"si lo tienes; si lo dejas vacío quedará **{isl.NO_ENCONTRADO}**.")
+            editado = st.data_editor(
+                [{'RUT': r['rut'], 'FICHA': r['ficha'], 'CONTRATO': r['contrato'],
+                  'DIAS LICENCIA': r['dias_lic'], 'IMPONIBLE': None} for r in no_enc],
+                column_config={'IMPONIBLE': st.column_config.NumberColumn(
+                    'IMPONIBLE', min_value=0, step=1, format="%d")},
+                disabled=['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA'],
+                hide_index=True, use_container_width=True,
+                key=f"editor_{e1['periodo']}")
+            manual = {f['FICHA']: f['IMPONIBLE'] for f in editado
+                      if f.get('IMPONIBLE') not in (None, '')}
+            if st.button(f"💾 Aplicar imponibles ingresados ({len(manual)})",
+                         disabled=not manual):
+                with st.spinner("Actualizando archivo de entrada…"):
+                    e1['entrada'] = isl.generar_entrada_con_columna(
+                        e1['mes_bytes'], res, manual)
+                    e1['manuales'] = len(manual)
+                    e1['manual'] = manual
+                st.session_state.pop('e2', None)
+                st.rerun()
 
-    if not archivos_ok:
-        faltantes = []
-        if not tw_file:     faltantes.append("tw.xlsx")
-        if not emp_file:    faltantes.append("empleadostw.xlsx")
-        if not equiv_file:  faltantes.append("Equivalencias Tw.xlsx")
-        if not params_file: faltantes.append("parametrosMesuales.xlsx")
-        if not cot_file:    faltantes.append("cot_afp_hist.xlsx")
-        if not asig_file:   faltantes.append("Asig Inst LD.xlsx")
-        st.info(f"Carga los 6 archivos para habilitar el proceso. Faltan: **{', '.join(faltantes)}**")
+    st.success(f"✅ Archivo de entrada listo"
+               + (f" ({e1['manuales']} imponibles ingresados a mano)" if e1['manuales'] else ""))
+    d1, d2 = st.columns(2)
+    d1.download_button(f"⬇️ {isl.nombre_entrada(e1['periodo'])}", e1['entrada'],
+                       file_name=isl.nombre_entrada(e1['periodo']), mime=XLSX_MIME)
+    d2.download_button(f"⬇️ {isl.nombre_informe(e1['periodo'])}",
+                       isl.generar_informe(res, e1.get('manual')),
+                       file_name=isl.nombre_informe(e1['periodo']), mime=XLSX_MIME)
 
-    btn_procesar = st.button("🚀 Procesar", type="primary", disabled=not archivos_ok)
+st.divider()
 
-    if btn_procesar and archivos_ok:
-        log_lines  = []
-        log_box    = st.empty()
-        prog_bar   = st.progress(0.0, text="Iniciando…")
-        status_msg = st.empty()
+# ── ETAPA 2 ─────────────────────────────────────────────────────────
+st.subheader("2️⃣ Etapa 2 — Archivo de salida Rex+")
+st.caption("Transforma el archivo de entrada de la Etapa 1 al formato de importación Rex+.")
 
-        def log_callback(msg):
-            log_lines.append(msg)
-            log_box.code('\n'.join(log_lines[-30:]))   # últimas 30 líneas
+if st.button("▶️ Generar archivo de salida", type="primary", disabled=not e1):
+    log_lines = []
+    log_box   = st.empty()
+    prog_bar  = st.progress(0.0, text="Iniciando…")
 
-        def progress_callback(frac):
-            prog_bar.progress(min(frac, 1.0), text=f"Procesando empleados… {frac*100:.1f}%")
+    def log_callback(msg):
+        log_lines.append(msg)
+        log_box.code('\n'.join(log_lines[-30:]))
 
-        try:
-            output_rows, advertencias, stats = procesar(
-                tw_bytes    = tw_file.read(),
-                equiv_bytes = equiv_file.read(),
-                emp_bytes   = emp_file.read(),
-                params_bytes= params_file.read(),
-                cot_bytes   = cot_file.read(),
-                asig_bytes  = asig_file.read() if asig_file else None,
-                progress_callback = progress_callback,
-                log_callback      = log_callback,
-            )
+    def progress_callback(frac):
+        prog_bar.progress(min(frac, 1.0), text=f"Procesando empleados… {frac*100:.1f}%")
 
-            prog_bar.progress(1.0, text="Generando archivo de salida…")
-            excel_bytes = generar_excel(output_rows)
-            prog_bar.empty()
-            log_box.empty()
+    try:
+        output_rows, advertencias, stats = procesar(
+            tw_bytes     = e1['entrada'],
+            equiv_bytes  = refs['equiv'].getvalue(),
+            emp_bytes    = refs['emp'].getvalue(),
+            params_bytes = refs['params'].getvalue(),
+            cot_bytes    = refs['cot'].getvalue(),
+            asig_bytes   = refs['asig'].getvalue() if 'asig' in refs else None,
+            progress_callback = progress_callback,
+            log_callback      = log_callback,
+        )
+        prog_bar.progress(1.0, text="Generando archivo de salida…")
+        st.session_state['e2'] = {
+            'excel': generar_excel(output_rows), 'stats': stats,
+            'advertencias': advertencias,
+        }
+        prog_bar.empty()
+        log_box.empty()
+    except Exception as e:
+        prog_bar.empty()
+        st.error(f"❌ Error en la Etapa 2: {e}")
+        import traceback
+        with st.expander("Detalle del error"):
+            st.code(traceback.format_exc())
 
-            # ── Resultados ──────────────────────────────────────────────
-            st.success("✅ Proceso completado")
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Período", stats['periodo'])
-            m2.metric("Empleados procesados", f"{stats['empleados']:,}")
-            m3.metric("Filas generadas", f"{stats['filas']:,}")
-            m4.metric("Advertencias", stats['advertencias'])
-
-            nombre_salida = f"salida_rex_{stats['periodo']}.xlsx"
-            st.download_button(
-                label     = "⬇️ Descargar salida_rex.xlsx",
-                data      = excel_bytes,
-                file_name = nombre_salida,
-                mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type      = "primary",
-            )
-
-            if advertencias:
-                with st.expander(f"⚠️ Ver advertencias ({len(advertencias)})"):
-                    for a in advertencias[:200]:
-                        st.text(a)
-                    if len(advertencias) > 200:
-                        st.caption(f"… y {len(advertencias) - 200} advertencias más.")
-
-        except Exception as e:
-            prog_bar.empty()
-            st.error(f"❌ Error durante el proceso: {e}")
-            with st.expander("Detalle del error"):
-                import traceback
-                st.code(traceback.format_exc())
+e2 = st.session_state.get('e2')
+if e2:
+    stats, advertencias = e2['stats'], e2['advertencias']
+    st.success("✅ Proceso completado")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Período", stats['periodo'])
+    m2.metric("Empleados procesados", f"{stats['empleados']:,}")
+    m3.metric("Filas generadas", f"{stats['filas']:,}")
+    m4.metric("Advertencias", stats['advertencias'])
+    st.download_button("⬇️ Descargar salida_rex.xlsx", e2['excel'],
+                       file_name=f"salida_rex_{stats['periodo']}.xlsx",
+                       mime=XLSX_MIME, type="primary")
+    if advertencias:
+        with st.expander(f"⚠️ Ver advertencias ({len(advertencias)})"):
+            for a in advertencias[:200]:
+                st.text(a)
+            if len(advertencias) > 200:
+                st.caption(f"… y {len(advertencias) - 200} advertencias más.")
