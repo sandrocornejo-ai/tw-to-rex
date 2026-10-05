@@ -911,12 +911,14 @@ if st.button("▶️ Generar archivo de entrada", type="primary", disabled=not l
             st.write("Insertando columnas…")
             mes_bytes = meses[mes_proc].getvalue()
             entrada = isl.generar_entrada_con_columna(mes_bytes, resultados)
+            st.write("Validando cuadratura del líquido…")
+            cuadratura = isl.cuadratura_liquido(entrada, refs['equiv'].getvalue())
             stt.update(label="Etapa 1 lista", state="complete", expanded=False)
         st.session_state['e1'] = {
             'periodo': mes_proc, 'mes_bytes': mes_bytes, 'resultados': resultados,
             'advertencias': [a for a in adv if 'no encontrada en el listado' not in a],
             'sin_listado': sin_listado, 'n_fichas': len(actual['fichas']),
-            'entrada': entrada, 'manuales': 0,
+            'entrada': entrada, 'manuales': 0, 'cuadratura': cuadratura,
         }
         st.session_state.pop('e2', None)
     except Exception as e:
@@ -942,6 +944,22 @@ if e1:
     else:
         st.caption(f"✅ Las {e1['n_fichas']:,} fichas del mes están en el listado de empleados."
                    .replace(',', '.'))
+
+    # Cuadratura: LIQUIDO = (haberes afectos + exentos) - (desc. legales + descuentos)
+    cuad = e1.get('cuadratura', [])
+    no_cuadran = [f for f in cuad if abs(f['dif']) > isl.TOLERANCIA_CUADRATURA]
+    fmt = lambda x: f"{x:,}".replace(',', '.')
+    if no_cuadran:
+        st.error(f"⚠️ **Cuadratura del líquido: {fmt(len(no_cuadran))} de {fmt(len(cuad))} "
+                 "fichas no cuadran** (líquido ≠ haberes − descuentos).")
+        with st.expander(f"Ver fichas que no cuadran ({len(no_cuadran)})"):
+            st.dataframe([{'RUT': f['rut'], 'FICHA': f['ficha'], 'TOTAL HABERES': f['ha'] + f['he'],
+                           'TOTAL DESCUENTOS': f['dl'] + f['de'], 'LIQUIDO CALCULADO': f['calc'],
+                           'LIQUIDO TW': f['liq'], 'DIFERENCIA': f['dif']} for f in no_cuadran],
+                         hide_index=True, width='stretch')
+    elif cuad:
+        st.caption(f"✅ Cuadratura del líquido: las {fmt(len(cuad))} fichas cuadran "
+                   "(líquido = haberes afectos + exentos − desc. legales − descuentos).")
     m1, m2, m3 = st.columns(3)
     m1.metric("Fichas con licencia", len(res))
     m2.metric("Imponible encontrado", len(res) - len(no_enc))
@@ -977,12 +995,16 @@ if e1:
 
     st.success(f"✅ Archivo de entrada listo"
                + (f" ({e1['manuales']} imponibles ingresados a mano)" if e1['manuales'] else ""))
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     d1.download_button(f"⬇️ {isl.nombre_entrada(e1['periodo'])}", e1['entrada'],
                        file_name=isl.nombre_entrada(e1['periodo']), mime=XLSX_MIME)
     d2.download_button(f"⬇️ {isl.nombre_informe(e1['periodo'])}",
                        isl.generar_informe(res, e1.get('manual')),
                        file_name=isl.nombre_informe(e1['periodo']), mime=XLSX_MIME)
+    if cuad:
+        d3.download_button(f"⬇️ {isl.nombre_cuadratura(e1['periodo'])}",
+                           isl.generar_cuadratura(cuad, e1['periodo']),
+                           file_name=isl.nombre_cuadratura(e1['periodo']), mime=XLSX_MIME)
 
 st.divider()
 

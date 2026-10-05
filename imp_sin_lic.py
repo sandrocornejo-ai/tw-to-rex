@@ -364,6 +364,130 @@ def imp_final(r, imp_manual=None):
 
 
 # ─────────────────────────────────────────────────────────────────
+#  Cuadratura del líquido (sobre el archivo de entrada procesado)
+# ─────────────────────────────────────────────────────────────────
+
+# Haberes afectos que en Equivalencias no figuran como "Haber afecto"
+HABERES_AFECTOS_EXTRA = {'SUELDO POR VACACIONES'}
+COLS_EXCLUIDAS_CUADRATURA = {'LIQUIDO'}
+TOLERANCIA_CUADRATURA = 1
+CUADRATURA_HEADERS = ['RUT', 'FICHA', 'HABERES AFECTOS', 'HABERES EXENTOS', 'TOTAL HABERES',
+                      'DESC. LEGALES', 'DESCUENTOS', 'TOTAL DESCUENTOS',
+                      'LIQUIDO CALCULADO', 'LIQUIDO TW', 'DIFERENCIA']
+
+
+def cargar_tipos(equiv_fuente):
+    """{columna TW: tipo} según Equivalencias Tw.xlsx."""
+    wb = _wb(equiv_fuente)
+    tipos = {}
+    for row in wb.worksheets[0].iter_rows(values_only=True):
+        if row and row[0] and row[0] != 'Nombre columna':
+            tipos[str(row[0]).strip()] = str(row[2] or '').strip()
+    wb.close()
+    return tipos
+
+
+def cuadratura_liquido(fuente, equiv_fuente):
+    """Por ficha: LIQUIDO = (haberes afectos + exentos) - (desc. legales + descuentos).
+    Retorna lista de dicts con los totales y la diferencia contra LIQUIDO."""
+    tipos = cargar_tipos(equiv_fuente)
+    wb = _wb(fuente)
+    ws = _hoja_tw(wb)
+    it = ws.iter_rows(values_only=True)
+    cab = [next(it, ()) for _ in range(FILA_ENCABEZADO)]
+    hdr = [str(h).strip() if h is not None else '' for h in cab[-1]]
+
+    def cols(tipo):
+        return [(i, c) for i, c in enumerate(hdr)
+                if tipos.get(c) == tipo and c not in COLS_EXCLUIDAS_CUADRATURA]
+    c_af = cols('Haber afecto') + [(i, c) for i, c in enumerate(hdr)
+                                   if c in HABERES_AFECTOS_EXTRA and tipos.get(c) != 'Haber afecto']
+    c_ex, c_dl, c_de = cols('Haber exento'), cols('Descuento Legal'), cols('Descuento')
+    i_fic, i_rut, i_liq = hdr.index('FICHA'), hdr.index('RUT'), hdr.index('LIQUIDO')
+
+    def suma(r, cs, negativos=False):
+        t = 0.0
+        for i, c in cs:
+            v = n(r[i]) if i < len(r) else 0.0
+            t += -v if (negativos and c in HABERES_NEGATIVOS) else v
+        return t
+
+    filas = []
+    for r in it:
+        if not r or i_fic >= len(r) or r[i_fic] in (None, ''):
+            continue
+        ha, he = suma(r, c_af, True), suma(r, c_ex)
+        dl, de = suma(r, c_dl), suma(r, c_de)
+        calc = ha + he - dl - de
+        liq = n(r[i_liq])
+        filas.append({'rut': normalizar_rut(r[i_rut]), 'ficha': str(r[i_fic]).strip(),
+                      'ha': round(ha), 'he': round(he), 'dl': round(dl), 'de': round(de),
+                      'calc': round(calc), 'liq': round(liq), 'dif': round(liq - calc)})
+    wb.close()
+    return filas
+
+
+def generar_cuadratura(filas, periodo):
+    """Excel con hoja Resumen, Diferencias y Detalle."""
+    wb = openpyxl.Workbook()
+    azul = PatternFill('solid', fgColor='1E5591')
+    rojo = PatternFill('solid', fgColor='F8D7DA')
+    dif = [f for f in filas if abs(f['dif']) > TOLERANCIA_CUADRATURA]
+
+    ws = wb.active
+    ws.title = 'Resumen'
+    tot = lambda k: sum(f[k] for f in filas)
+    resumen = [
+        ('Mes', nombre_periodo(periodo)),
+        ('Regla', 'LIQUIDO = (haberes afectos + exentos) - (desc. legales + descuentos)'),
+        ('Fichas', len(filas)),
+        ('Cuadran', len(filas) - len(dif)),
+        ('No cuadran', len(dif)),
+        ('Total haberes afectos', tot('ha')),
+        ('Total haberes exentos', tot('he')),
+        ('Total desc. legales', tot('dl')),
+        ('Total descuentos', tot('de')),
+        ('Líquido calculado', tot('calc')),
+        ('Líquido TW', tot('liq')),
+        ('Diferencia', tot('liq') - tot('calc')),
+    ]
+    for k, v in resumen:
+        ws.append([k, v])
+        ws.cell(ws.max_row, 1).font = Font(bold=True)
+        if isinstance(v, (int, float)):
+            ws.cell(ws.max_row, 2).number_format = '#,##0'
+    ws.column_dimensions['A'].width = 24
+    ws.column_dimensions['B'].width = 70
+
+    for titulo, datos in (('Diferencias', dif), ('Detalle', filas)):
+        w = wb.create_sheet(titulo)
+        w.append(CUADRATURA_HEADERS)
+        for c in w[1]:
+            c.font = Font(bold=True, color='FFFFFF')
+            c.fill = azul
+        for f in datos:
+            w.append([f['rut'], f['ficha'], f['ha'], f['he'], f['ha'] + f['he'],
+                      f['dl'], f['de'], f['dl'] + f['de'], f['calc'], f['liq'], f['dif']])
+            if abs(f['dif']) > TOLERANCIA_CUADRATURA:
+                for c in w[w.max_row]:
+                    c.fill = rojo
+        for fila in w.iter_rows(min_row=2, min_col=3):
+            for c in fila:
+                c.number_format = '#,##0'
+        for i in range(1, len(CUADRATURA_HEADERS) + 1):
+            w.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 16
+        w.freeze_panes = 'A2'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def nombre_cuadratura(periodo):
+    return f"Cuadratura {nombre_periodo(periodo)}.xlsx"
+
+
+# ─────────────────────────────────────────────────────────────────
 #  Reconocimiento automático de los archivos cargados
 # ─────────────────────────────────────────────────────────────────
 
