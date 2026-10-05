@@ -717,13 +717,13 @@ def generar_excel(output_rows):
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 ETIQUETAS = {
-    'equiv':  "Equivalencias Tw.xlsx",
-    'params': "parametrosMesuales.xlsx",
-    'cot':    "cot_afp_hist.xlsx",
-    'emp':    "EmpleadosTW.xlsx",
-    'asig':   "Asig Inst LD.xlsx (opcional)",
+    'emp':    "👥 EmpleadosTW.xlsx  *(maestro de empleados)*",
+    'equiv':  "🔄 Equivalencias Tw.xlsx  *(mapeo de conceptos)*",
+    'params': "⚙️ parametrosMesuales.xlsx  *(topes y tasas)*",
+    'cot':    "📊 cot_afp_hist.xlsx  *(cotizaciones AFP)*",
+    'asig':   "🏦 Asig Inst LD.xlsx  *(opcional)*",
 }
-OBLIGATORIOS = ('equiv', 'params', 'cot', 'emp')
+OBLIGATORIOS = ('emp', 'equiv', 'params', 'cot')
 
 
 @st.cache_data(show_spinner=False)
@@ -751,26 +751,23 @@ def _mes(datos, haberes):
     return isl.leer_mes(datos, set(haberes))
 
 
-def clasificar(archivos):
-    """Reconoce cada archivo cargado. Retorna (refs, meses, ignorados)."""
-    refs, meses, ignorados = {}, {}, []
+def clasificar_meses(archivos):
+    """Detecta el período de cada archivo mensual. Retorna (meses, ignorados)."""
+    meses, ignorados = {}, []
     for f in archivos:
         if f.name.startswith('~$'):
             continue
-        tipo = isl.tipo_por_nombre(f.name)
-        if tipo == 'salida':
+        if isl.tipo_por_nombre(f.name) == 'salida':
             ignorados.append(f"{f.name} (resultado de un proceso anterior)")
-        elif tipo:
-            refs[tipo] = f
+            continue
+        p = _periodo(f.name, f.getvalue())
+        if p and p in meses:
+            ignorados.append(f"{f.name} (repite {isl.nombre_periodo(p)})")
+        elif p:
+            meses[p] = f
         else:
-            p = _periodo(f.name, f.getvalue())
-            if p and p in meses:
-                ignorados.append(f"{f.name} (repite {isl.nombre_periodo(p)})")
-            elif p:
-                meses[p] = f
-            else:
-                ignorados.append(f.name)
-    return refs, meses, ignorados
+            ignorados.append(f"{f.name} (no es un archivo mensual de TeamWork)")
+    return meses, ignorados
 
 
 st.set_page_config(page_title="TeamWork → Rex+", page_icon="💼", layout="wide")
@@ -778,48 +775,47 @@ st.title("💼 TeamWork → Rex+")
 st.caption("Transforma liquidaciones de TeamWork al formato de importación Rex+")
 
 # ── Carga de archivos ───────────────────────────────────────────────
-st.subheader("📂 Archivos")
-archivos = st.file_uploader(
-    "Arrastra aquí todos los archivos: los meses de TeamWork (el que vas a procesar y "
-    "los anteriores), Equivalencias, parámetros, cot_afp_hist, empleados y Asig Inst LD.",
-    type=["xlsx"], accept_multiple_files=True, key="archivos")
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("📅 Meses de TeamWork")
+    archivos_mes = st.file_uploader(
+        "Sube juntos el mes a procesar y los meses anteriores",
+        type=["xlsx"], accept_multiple_files=True, key="meses")
+    meses, ignorados = clasificar_meses(archivos_mes or [])
+    mes_proc = None
+    if meses:
+        orden = sorted(meses, reverse=True)
+        mes_proc = st.selectbox("Mes a procesar", orden, index=0,
+                                format_func=isl.nombre_periodo)
+        ant = [p for p in orden if p < mes_proc]
+        st.caption("Meses anteriores para buscar el imponible: " +
+                   (", ".join(isl.nombre_periodo(p) for p in ant) or "ninguno"))
+    for x in ignorados:
+        st.caption(f"⚠️ Se ignora: {x}")
 
-refs, meses, ignorados = clasificar(archivos or [])
-firma = tuple(sorted((f.name, f.size) for f in (archivos or [])))
+with c2:
+    st.subheader("📚 Archivos de referencia")
+    refs = {}
+    for tipo, etiqueta in ETIQUETAS.items():
+        f = st.file_uploader(etiqueta, type=["xlsx"], key=f"ref_{tipo}")
+        if f:
+            refs[tipo] = f
+
+firma = (tuple(sorted((f.name, f.size) for f in (archivos_mes or []))),
+         tuple(sorted((t, f.name, f.size) for t, f in refs.items())), mes_proc)
 if st.session_state.get('firma') != firma:          # cambiaron los archivos
     for k in ('e1', 'e2'):
         st.session_state.pop(k, None)
     st.session_state['firma'] = firma
 
-mes_proc = None
-if archivos:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Referencias**")
-        for tipo, etiqueta in ETIQUETAS.items():
-            f = refs.get(tipo)
-            marca = "✅" if f else ("⚪" if tipo == 'asig' else "❌")
-            st.markdown(f"{marca} {etiqueta}" + (f" — `{f.name}`" if f else ""))
-    with c2:
-        st.markdown("**Meses de TeamWork**")
-        if meses:
-            orden = sorted(meses, reverse=True)
-            mes_proc = st.selectbox("Mes a procesar", orden, index=0,
-                                    format_func=isl.nombre_periodo)
-            ant = [p for p in orden if p < mes_proc]
-            st.caption("Meses anteriores para buscar el imponible: " +
-                       (", ".join(isl.nombre_periodo(p) for p in ant) or "ninguno"))
-        else:
-            st.markdown("❌ Ningún archivo mensual reconocido")
-    if ignorados:
-        st.caption("No reconocidos (se ignoran): " + ", ".join(ignorados))
-
-faltan = [ETIQUETAS[t] for t in OBLIGATORIOS if t not in refs]
-if archivos and not meses:
-    faltan.insert(0, "mes a procesar")
-listo = bool(archivos) and not faltan
-if archivos and faltan:
-    st.warning("Faltan: **" + ", ".join(faltan) + "**")
+NOMBRES = {'emp': "EmpleadosTW", 'equiv': "Equivalencias", 'params': "parametrosMesuales",
+           'cot': "cot_afp_hist"}
+faltan = [NOMBRES[t] for t in OBLIGATORIOS if t not in refs]
+if not meses:
+    faltan.insert(0, "meses de TeamWork")
+listo = not faltan
+if faltan:
+    st.info("Para comenzar faltan: **" + ", ".join(faltan) + "**")
 
 st.divider()
 
