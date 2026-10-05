@@ -92,6 +92,23 @@ AFECTO_GRUPO_AFP_CON_LIC = {          # suma o (topeAFP - IMP SL SIS)
 AFECTO_AFP_MAS_SIS = {'sis', 'aporteFAPPCEV'}     # afecto afp + IMP SL SIS
 AFECTO_GRUPO_CES = {'cesAporteCi', 'cesAporteSol'}
 
+# Con licencia, el afecto de estos conceptos se deduce del monto de TeamWork:
+#   sis, aporteFAPPCEV -> monto / (Cotización de jubilación / 100)
+#   cesAporteSol       -> monto / 0,03
+AFECTO_DESDE_MONTO_COTIZ = {'sis', 'aporteFAPPCEV'}
+AFECTO_DESDE_MONTO_TASA = {'cesAporteSol': 0.03}
+
+
+def afecto_desde_monto(id_concepto, monto, cotiz):
+    """Afecto con licencia deducido del monto; None si no aplica."""
+    if id_concepto in AFECTO_DESDE_MONTO_COTIZ:
+        tasa = n(cotiz) / 100
+    elif id_concepto in AFECTO_DESDE_MONTO_TASA:
+        tasa = AFECTO_DESDE_MONTO_TASA[id_concepto]
+    else:
+        return None
+    return round(monto / tasa) if tasa > 0 else None
+
 DESC_LEGAL_MANUALES = {
     'AFP', 'FONASA', 'ISAPRE', 'IMPUESTO UNICO',
     'IMPUESTO UNICO DOBLE CONTRATO', 'SEG SES TRAB',
@@ -697,6 +714,10 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
                 inst  = get_institucion(id_c, emp, row, desde_ago)
                 cotiz = get_cotizacion(id_c, emp, afecto_v, periodo, desde_ago,
                                        sis_tasa, aporte_afp, seg_vida, aporte_bac)
+                if dias_lic > 0:
+                    af_monto = afecto_desde_monto(id_c, monto_v, cotiz)
+                    if af_monto is not None:
+                        afecto_v = af_monto
                 fila(id_c, monto_v, afecto_v, inst, cotiz)
 
         # Descuentos normales
@@ -724,6 +745,10 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
                 inst  = get_institucion(id_c, emp, row, desde_ago)
                 cotiz = get_cotizacion(id_c, emp, afecto_v, periodo, desde_ago,
                                        sis_tasa, aporte_afp, seg_vida, aporte_bac)
+                if dias_lic > 0:
+                    af_monto = afecto_desde_monto(id_c, monto_v, cotiz)
+                    if af_monto is not None:
+                        afecto_v = af_monto
                 fila(id_c, monto_v, afecto_v, inst, cotiz)
 
         # totalesEmpl (LIQUIDO)
