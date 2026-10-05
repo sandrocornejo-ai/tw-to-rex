@@ -429,7 +429,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         if concepto == 'mutual':
             return n(emp.get('% Mutual', 0))
         if concepto == 'sis':
-            return sis_tasa
+            return round(sis_tasa, 2)
         if concepto == 'aporteAFPemp':
             return aporte_afp
         if concepto == 'aporteFAPPCEV':
@@ -764,6 +764,13 @@ def generar_excel(output_rows):
     ws.title = 'Liquidaciones'
     for row in output_rows:
         ws.append(row)
+    # Cotización de jubilación del sis con 2 decimales
+    hdr = output_rows[0]
+    c_con = hdr.index('Id del concepto') + 1
+    c_cot = hdr.index('Cotización de jubilación') + 1
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, c_con).value == 'sis':
+            ws.cell(r, c_cot).number_format = '0.00'
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
