@@ -87,6 +87,7 @@ AFECTO_GRUPO_AFP_SIN_LIC = {
 }
 AFECTO_GRUPO_AFP_CON_LIC = {          # suma o (topeAFP - IMP SL SIS)
     'afp', 'isapre', 'cesEmpleado', 'cajaComp', 'mutual', 'aporteFAPPBAC',
+    'aporteAFPemp',
 }
 AFECTO_AFP_MAS_SIS = {'sis', 'aporteFAPPCEV'}     # afecto afp + IMP SL SIS
 AFECTO_GRUPO_CES = {'cesAporteCi', 'cesAporteSol'}
@@ -155,11 +156,10 @@ def calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp, tope_ces, imp_sl
       aporteFAPPCEV, aporteFAPPBAC  -> min(suma afectos, topeImp_pesos_afp)
       cesAporteCi, cesAporteSol     -> min(suma afectos, topeCes_pesos)
     licenciaDias > 0:
-      afp, isapre, cesEmpleado, cajaComp, mutual, aporteFAPPBAC
+      afp, isapre, cesEmpleado, cajaComp, mutual, aporteFAPPBAC, aporteAFPemp
           -> suma afectos si es <= topeImp_pesos_afp; si no, topeImp_pesos_afp - IMP SL SIS
       sis, aporteFAPPCEV            -> afecto afp + IMP SL SIS
       cesAporteCi, cesAporteSol     -> min(suma afectos + IMP SL SIS, topeCes_pesos)
-      aporteAFPemp                  -> min(suma afectos, topeImp_pesos_afp)  (sin regla de licencia)
     """
     suma = max(suma_afectos, 0)
     tope = lambda v, t: min(v, t) if t > 0 else v
@@ -180,7 +180,6 @@ def calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp, tope_ces, imp_sl
         af[c] = af_afp + imp_sl_sis
     for c in AFECTO_GRUPO_CES:
         af[c] = tope(suma + imp_sl_sis, tope_ces)
-    af['aporteAFPemp'] = tope(suma, tope_afp)
     return af
 
 
