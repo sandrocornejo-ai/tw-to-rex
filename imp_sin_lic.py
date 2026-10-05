@@ -16,7 +16,7 @@ Salidas:
   * Copia del archivo de entrada con la columna IMP SIN LIC insertada
     inmediatamente a la derecha de DIAS LICENCIA (cero por defecto).
   * Informe ImpSinLic<MES AAAA>.xlsx con RUT, FICHA, CONTRATO,
-    DIAS LICENCIA, ULT IMP SIN LIC e IMP IMP SIS = (ULT IMP SIN LIC / 30) * DIAS LICENCIA
+    SUELDO CONTRATO (Sueldo Base del listado de empleados), DIAS LICENCIA, ULT IMP SIN LIC e IMP IMP SIS = (ULT IMP SIN LIC / 30) * DIAS LICENCIA
     (DIAS LICENCIA limitado a 30).
 
 Uso por línea de comandos (sin ingreso manual):
@@ -55,8 +55,8 @@ MESES_ES = {
 }
 NOMBRE_MES = {v: k for k, v in MESES_ES.items()}
 
-INFORME_HEADERS = ['RUT', 'FICHA', 'CONTRATO', 'DIAS LICENCIA', 'ULT IMP SIN LIC',
-                   'IMP IMP SIS']
+INFORME_HEADERS = ['RUT', 'FICHA', 'CONTRATO', 'SUELDO CONTRATO', 'DIAS LICENCIA',
+                   'ULT IMP SIN LIC', 'IMP IMP SIS']
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -339,12 +339,13 @@ def generar_informe(resultados, imp_manual=None):
         imp = imp_final(r, imp_manual)
         sis = sis_final(r, imp)
         dias = int(r['dias_lic']) if float(r['dias_lic']).is_integer() else r['dias_lic']
-        ws.append([r['rut'], r['ficha'], r['contrato'], dias, imp, sis])
-    for fila in ws.iter_rows(min_row=2, min_col=5, max_col=6):
+        sueldo = round(n(r.get('sueldo_base')))
+        ws.append([r['rut'], r['ficha'], r['contrato'], sueldo, dias, imp, sis])
+    for fila in ws.iter_rows(min_row=2, min_col=4, max_col=7):
         for c in fila:
             if isinstance(c.value, (int, float)):
                 c.number_format = '#,##0'
-    for col, w in zip('ABCDEF', (14, 14, 11, 14, 18, 16)):
+    for col, w in zip('ABCDEFG', (14, 14, 11, 18, 14, 18, 16)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = 'A2'
     buf = io.BytesIO()
