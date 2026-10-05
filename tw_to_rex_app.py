@@ -77,6 +77,20 @@ CONCEPTOS_BASE_IMP = {
 }
 CONCEPTOS_BASE_TOT = {'totalesEmpl'}
 
+# ── Afecto según licencia (licenciaDias) ─────────────────────────────
+# Sin licencia: grupo AFP = min(suma haberes afectos, topeImp_pesos_afp)
+#               grupo CES = min(suma haberes afectos, topeCes_pesos)
+# Con licencia: ver calcular_afectos_licencia()
+AFECTO_GRUPO_AFP_SIN_LIC = {
+    'afp', 'isapre', 'cesEmpleado', 'cajaComp', 'mutual', 'sis',
+    'aporteAFPemp', 'aporteFAPPCEV', 'aporteFAPPBAC',
+}
+AFECTO_GRUPO_AFP_CON_LIC = {          # suma o (topeAFP - IMP SL SIS)
+    'afp', 'isapre', 'cesEmpleado', 'cajaComp', 'mutual', 'aporteFAPPBAC',
+}
+AFECTO_AFP_MAS_SIS = {'sis', 'aporteFAPPCEV'}     # afecto afp + IMP SL SIS
+AFECTO_GRUPO_CES = {'cesAporteCi', 'cesAporteSol'}
+
 DESC_LEGAL_MANUALES = {
     'AFP', 'FONASA', 'ISAPRE', 'IMPUESTO UNICO',
     'IMPUESTO UNICO DOBLE CONTRATO', 'SEG SES TRAB',
@@ -131,6 +145,43 @@ def desde_agosto_2026(periodo):
         return (y > 2026) or (y == 2026 and mo >= 8)
     except Exception:
         return False
+
+
+def calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp, tope_ces, imp_sl_sis):
+    """Afecto de los conceptos previsionales según haya o no licencia.
+
+    licenciaDias = 0:
+      afp, isapre, cesEmpleado, cajaComp, mutual, sis, aporteAFPemp,
+      aporteFAPPCEV, aporteFAPPBAC  -> min(suma afectos, topeImp_pesos_afp)
+      cesAporteCi, cesAporteSol     -> min(suma afectos, topeCes_pesos)
+    licenciaDias > 0:
+      afp, isapre, cesEmpleado, cajaComp, mutual, aporteFAPPBAC
+          -> suma afectos si es <= topeImp_pesos_afp; si no, topeImp_pesos_afp - IMP SL SIS
+      sis, aporteFAPPCEV            -> afecto afp + IMP SL SIS
+      cesAporteCi, cesAporteSol     -> min(suma afectos + IMP SL SIS, topeCes_pesos)
+      aporteAFPemp                  -> min(suma afectos, topeImp_pesos_afp)  (sin regla de licencia)
+    """
+    suma = max(suma_afectos, 0)
+    tope = lambda v, t: min(v, t) if t > 0 else v
+    af = {}
+    if dias_lic <= 0:
+        for c in AFECTO_GRUPO_AFP_SIN_LIC:
+            af[c] = tope(suma, tope_afp)
+        for c in AFECTO_GRUPO_CES:
+            af[c] = tope(suma, tope_ces)
+        return af
+    if tope_afp <= 0 or suma <= tope_afp:
+        af_afp = suma
+    else:
+        af_afp = max(tope_afp - imp_sl_sis, 0)
+    for c in AFECTO_GRUPO_AFP_CON_LIC:
+        af[c] = af_afp
+    for c in AFECTO_AFP_MAS_SIS:
+        af[c] = af_afp + imp_sl_sis
+    for c in AFECTO_GRUPO_CES:
+        af[c] = tope(suma + imp_sl_sis, tope_ces)
+    af['aporteAFPemp'] = tope(suma, tope_afp)
+    return af
 
 
 def get_afecto(id_concepto, base_afp, base_ces, base_imp, suma_afectos):
@@ -432,6 +483,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
     IDX_RUT   = col_idx('RUT')
     IDX_FICHA = col_idx('FICHA')
     IDX_DIAS_LIC  = col_idx('DIAS LICENCIA')
+    IDX_IMP_SL_SIS = col_idx('IMP SL SIS')        # agregada en la Etapa 1
     IDX_DIAS_TRAB = col_idx('DIAS TRABAJADOS')
     IDX_FONASA    = col_idx('FONASA')
     IDX_ISAPRE    = col_idx('ISAPRE')
@@ -525,6 +577,11 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         base_ces = max(min(suma_afectos, tope_ces) if tope_ces > 0 else suma_afectos, 0)
         suma_afectos_pos = max(suma_afectos, 0)
 
+        # Afectos previsionales según licencia (IMP SL SIS viene de la Etapa 1)
+        imp_sl_sis = n(safe_val(row, IDX_IMP_SL_SIS)) if dias_lic > 0 else 0.0
+        afectos_lic = calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp,
+                                                tope_ces, imp_sl_sis)
+
         v_afp_col    = n(safe_val(row, IDX_AFP))
         v_seg_ses    = n(safe_val(row, IDX_SEG_SES))
         v_apv_sum    = sum(n(safe_val(row, i)) for i in APV_COLS)
@@ -607,15 +664,15 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
             inst  = get_institucion('afp', emp, row, desde_ago)
             cotiz = get_cotizacion('afp', emp, base_afp, periodo, desde_ago,
                                    sis_tasa, aporte_afp, seg_vida, aporte_bac)
-            fila('afp', v_afp_col, base_afp, inst, cotiz)
+            fila('afp', v_afp_col, afectos_lic['afp'], inst, cotiz)
 
         # isapre (siempre) — cotización = mismo valor que monto
         inst_isapre = get_institucion('isapre', emp, row, desde_ago)
-        fila('isapre', monto_isapre, base_afp, inst_isapre, monto_isapre)
+        fila('isapre', monto_isapre, afectos_lic['isapre'], inst_isapre, monto_isapre)
 
         # cesEmpleado (siempre)
         inst_ces = get_institucion('cesEmpleado', emp, row, desde_ago)
-        fila('cesEmpleado', v_seg_ses, base_afp, inst_ces, 0.6)   # afecto = mismo que afp
+        fila('cesEmpleado', v_seg_ses, afectos_lic['cesEmpleado'], inst_ces, 0.6)
 
         # impuesto (siempre)
         v_imp1 = n(safe_val(row, IDX_IMP1))
@@ -635,7 +692,9 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
             desc_legal_agrup[id_c] = desc_legal_agrup.get(id_c, 0) + v
         for id_c, monto_v in desc_legal_agrup.items():
             if monto_v != 0:
-                afecto_v = get_afecto(id_c, base_afp, base_ces, base_imp, suma_afectos_pos)
+                afecto_v = afectos_lic.get(id_c)
+                if afecto_v is None:
+                    afecto_v = get_afecto(id_c, base_afp, base_ces, base_imp, suma_afectos_pos)
                 inst  = get_institucion(id_c, emp, row, desde_ago)
                 cotiz = get_cotizacion(id_c, emp, afecto_v, periodo, desde_ago,
                                        sis_tasa, aporte_afp, seg_vida, aporte_bac)
@@ -660,7 +719,9 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
             aporte_agrup[id_c] = aporte_agrup.get(id_c, 0) + v
         for id_c, monto_v in aporte_agrup.items():
             if monto_v != 0:
-                afecto_v = get_afecto(id_c, base_afp, base_ces, base_imp, suma_afectos_pos)
+                afecto_v = afectos_lic.get(id_c)
+                if afecto_v is None:
+                    afecto_v = get_afecto(id_c, base_afp, base_ces, base_imp, suma_afectos_pos)
                 inst  = get_institucion(id_c, emp, row, desde_ago)
                 cotiz = get_cotizacion(id_c, emp, afecto_v, periodo, desde_ago,
                                        sis_tasa, aporte_afp, seg_vida, aporte_bac)
@@ -682,7 +743,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
             monto_ccaf = suma_afectos * (aporte_ccaf / 100)
             if monto_ccaf != 0:
                 id_ccaf = emp.get('Id CCAF') or ''
-                fila('cajaComp', monto_ccaf, id_inst=id_ccaf)
+                fila('cajaComp', monto_ccaf, afectos_lic['cajaComp'], id_inst=id_ccaf)
 
         n_procesados += 1
         if progress_callback and total > 0:
