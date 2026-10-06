@@ -34,6 +34,8 @@ import glob
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 
+import excel_rapido as er
+
 COL_DIAS_LIC   = 'DIAS LICENCIA'
 COL_NUEVA      = 'IMP SIN LIC'
 COL_SIS        = 'IMP SL SIS'
@@ -106,6 +108,24 @@ def _wb(fuente, read_only=True):
     return openpyxl.load_workbook(fuente, read_only=read_only, data_only=True)
 
 
+def _avisar(avance, i, total, cada=200):
+    """Informa el avance (0..1) cada `cada` filas, si hay callback y total conocido."""
+    if avance and total and i % cada == 0:
+        avance(min(i / total, 1.0))
+
+
+def _es_hoja_tw(cab):
+    """cab: primeras filas de una hoja. ¿Es la hoja de liquidaciones de TW?"""
+    fila2 = str(cab[1][0]) if len(cab) > 1 and cab[1] and cab[1][0] is not None else ''
+    return bool(parsear_periodo(fila2) or (len(cab) >= FILA_ENCABEZADO and 'FICHA' in
+                [str(c).strip() for c in cab[FILA_ENCABEZADO - 1] if c]))
+
+
+def _filas_tw(fuente):
+    """(indice_hoja, total_filas, iterador) de la hoja de liquidaciones de TW."""
+    return er.leer_hoja(fuente, _es_hoja_tw)
+
+
 def _hoja_tw(wb):
     """Hoja con 'Mes a procesar' en la fila 2 o FICHA en el encabezado."""
     for ws in wb.worksheets:
@@ -151,11 +171,10 @@ def cargar_topes(params_fuente):
     return topes
 
 
-def cargar_contratos(emp_fuente):
-    """{FICHA ('Nombre del contrato'): {'contrato': 'Contrato', 'sueldo_base': 'Sueldo Base'}}"""
-    wb = _wb(emp_fuente)
-    ws = wb.worksheets[0]
-    it = ws.iter_rows(values_only=True)
+def cargar_contratos(emp_fuente, avance=None):
+    """{FICHA ('Nombre del contrato'): {'contrato': 'Contrato', 'sueldo_base': 'Sueldo Base'}}
+    avance(fraccion): opcional, informa el avance de la lectura (0..1)."""
+    _, total, it = er.leer_hoja(emp_fuente)
     next(it, None)                                   # fila 1: título
     hdr = [str(h).strip() if h else '' for h in (next(it, None) or [])]
     i_fic = next(hdr.index(c) for c in ('Nombre del contrato', 'Nombre contr.',
@@ -163,25 +182,26 @@ def cargar_contratos(emp_fuente):
     i_con = next(hdr.index(c) for c in ('Contrato', 'N° Contrato', 'Nº Contrato',
                                         'N° contrato') if c in hdr)
     i_sb = next((hdr.index(c) for c in ('Sueldo Base', 'Base contrato') if c in hdr), None)
+    i_rut = next((hdr.index(c) for c in ('Rut', 'RUT') if c in hdr), None)
     contratos = {}
-    for r in it:
+    for k, r in enumerate(it):
+        _avisar(avance, k, total, 2000)
         if not r or r[i_fic] is None:
             continue
         c = r[i_con]
         if isinstance(c, float) and c.is_integer():
             c = int(c)
         sb = n(r[i_sb]) if i_sb is not None and i_sb < len(r) else 0.0
-        contratos[str(r[i_fic]).strip()] = {'contrato': c, 'sueldo_base': sb}
-    wb.close()
+        rut = normalizar_rut(r[i_rut]) if i_rut is not None and i_rut < len(r) else ''
+        contratos[str(r[i_fic]).strip()] = {'contrato': c, 'sueldo_base': sb, 'rut': rut}
     return contratos
 
 
-def leer_mes(fuente, haberes_afectos):
+def leer_mes(fuente, haberes_afectos, avance=None):
     """Lee un archivo mensual de TW.
-    Retorna {'periodo': 'AAAA-MM', 'fichas': {FICHA: {...}}}."""
-    wb = _wb(fuente)
-    ws = _hoja_tw(wb)
-    it = ws.iter_rows(values_only=True)
+    Retorna {'periodo': 'AAAA-MM', 'fichas': {FICHA: {...}}}.
+    avance(fraccion): opcional, informa el avance de la lectura (0..1)."""
+    _, total, it = _filas_tw(fuente)
     cab = [next(it, ()) for _ in range(FILA_ENCABEZADO)]
     periodo = parsear_periodo(cab[1][0] if cab[1] else '')
     hdr = [str(h).strip() if h is not None else '' for h in cab[-1]]
@@ -189,7 +209,8 @@ def leer_mes(fuente, haberes_afectos):
     afectos = [(i, c) for i, c in enumerate(hdr) if c in haberes_afectos]
 
     fichas = {}
-    for r in it:
+    for k, r in enumerate(it):
+        _avisar(avance, k, total)
         if not r or i_fic >= len(r) or r[i_fic] in (None, ''):
             continue
         suma = 0.0
@@ -201,7 +222,6 @@ def leer_mes(fuente, haberes_afectos):
             'dias_lic': n(r[i_lic]),
             'suma_afectos': suma,
         }
-    wb.close()
     return {'periodo': periodo, 'fichas': fichas}
 
 
@@ -271,16 +291,51 @@ def imp_imp_sis(imp, dias_lic):
 #  Archivos de salida
 # ─────────────────────────────────────────────────────────────────
 
-def generar_entrada_con_columna(fuente, resultados, imp_manual=None):
+def _entrada_rapida(fuente, por_ficha, imp_manual, avance=None):
+    """Igual que generar_entrada_con_columna pero editando el XML (segundos).
+    Retorna None si el archivo no se puede tratar así."""
+    idx, _, it = _filas_tw(fuente)
+    filas = list(it)
+    if len(filas) < FILA_ENCABEZADO:
+        return None
+    hdr = [str(h).strip() if h is not None else '' for h in filas[FILA_ENCABEZADO - 1]]
+    if COL_DIAS_LIC not in hdr or 'FICHA' not in hdr:
+        return None
+    i_lic, i_fic = hdr.index(COL_DIAS_LIC), hdr.index('FICHA')
+    valores = {}
+    for nfila, r in enumerate(filas[FILA_ENCABEZADO:], start=FILA_ENCABEZADO + 1):
+        ficha = r[i_fic] if i_fic < len(r) else None
+        if ficha in (None, ''):
+            continue
+        res = por_ficha.get(str(ficha).strip())
+        if res is None:
+            valores[nfila] = (0, 0)
+        else:
+            imp = imp_final(res, imp_manual)
+            valores[nfila] = (imp, sis_final(res, imp))
+    sub = (lambda f: avance(0.1 + 0.9 * f)) if avance else None
+    if avance:
+        avance(0.1)
+    return er.insertar_columnas(fuente, idx, i_lic + 1, FILA_ENCABEZADO,
+                                (COL_NUEVA, COL_SIS), valores, ancho_min=14, avance=sub)
+
+
+def generar_entrada_con_columna(fuente, resultados, imp_manual=None, avance=None):
     """Copia del archivo mensual con dos columnas nuevas inmediatamente a la
     derecha de DIAS LICENCIA:
       IMP SIN LIC = imponible del último mes sin licencia (0 si no hay licencia)
       IMP SL SIS  = (IMP SIN LIC / 30) * min(DIAS LICENCIA, 30)
     Las fichas con licencia sin imponible quedan con 'Imp no encontrado' en
     IMP SIN LIC, e IMP SL SIS se calcula con el Sueldo Base del listado de
-    empleados: (Sueldo Base / 30) * min(DIAS LICENCIA, 30)."""
+    empleados: (Sueldo Base / 30) * min(DIAS LICENCIA, 30).
+    avance(fraccion): opcional. Abrir y guardar el Excel no se puede medir, así
+    que solo se informa el recorrido de filas (de 0,4 a 0,6)."""
     imp_manual = imp_manual or {}
     por_ficha = {r['ficha']: r for r in resultados}
+
+    rapido = _entrada_rapida(fuente, por_ficha, imp_manual, avance)
+    if rapido is not None:
+        return rapido
 
     wb = _wb(fuente, read_only=False)
     ws = _hoja_tw(wb)
@@ -305,7 +360,11 @@ def generar_entrada_con_columna(fuente, resultados, imp_manual=None):
             enc._style = ref._style
         ws.column_dimensions[letra(col)].width = max(ancho or 0, 14)
 
+    if avance:
+        avance(0.4)
     for r in range(FILA_ENCABEZADO + 1, ws.max_row + 1):
+        if avance and r % 200 == 0:
+            avance(0.4 + 0.2 * r / ws.max_row)
         ficha = ws.cell(r, col_fic).value
         if ficha in (None, ''):
             continue
@@ -353,6 +412,74 @@ def generar_informe(resultados, imp_manual=None):
     return buf.getvalue()
 
 
+# ─────────────────────────────────────────────────────────────────
+#  Informe de fichas que no están en el listado de empleados
+# ─────────────────────────────────────────────────────────────────
+
+SIN_LISTADO_COLS = ['RUT', 'FICHA', 'NOMBRE', 'Area de Negocio', 'AGENCIA', 'CARGO',
+                    'FECHA INICIO', 'FECHA TERMINO', 'ESTADO', 'DIAS TRABAJADOS',
+                    'DIAS LICENCIA', 'SUELDO DEL MES', 'LIQUIDO']
+SIN_LISTADO_HEADERS = SIN_LISTADO_COLS + ['FICHAS DEL RUT EN EL LISTADO']
+
+
+def sin_listado(mes_fuente, contratos):
+    """Fichas del mes que no están en el listado de empleados, con sus datos
+    del archivo de TeamWork y las otras fichas que el mismo RUT sí tiene en
+    el listado (ayuda a detectar un cambio de ficha)."""
+    por_rut = {}
+    for ficha, d in contratos.items():
+        if d.get('rut'):
+            por_rut.setdefault(d['rut'], []).append(ficha)
+    _, _, it = _filas_tw(mes_fuente)
+    cab = [next(it, ()) for _ in range(FILA_ENCABEZADO)]
+    hdr = [str(h).strip() if h is not None else '' for h in cab[-1]]
+    i_fic, i_rut = hdr.index('FICHA'), hdr.index('RUT')
+    idx = [(c, hdr.index(c)) for c in SIN_LISTADO_COLS if c in hdr]
+    filas = []
+    for r in it:
+        if not r or i_fic >= len(r) or r[i_fic] in (None, ''):
+            continue
+        ficha = str(r[i_fic]).strip()
+        if ficha in contratos:
+            continue
+        f = {c: (r[i] if i < len(r) else None) for c, i in idx}
+        f['RUT'] = normalizar_rut(r[i_rut])
+        f['FICHA'] = ficha
+        f['FICHAS DEL RUT EN EL LISTADO'] = ', '.join(sorted(por_rut.get(f['RUT'], []))) or '—'
+        filas.append(f)
+    return filas
+
+
+def generar_informe_sin_listado(filas, periodo):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Sin listado'
+    ws.append([f"Fichas de {nombre_periodo(periodo)} que no están en el listado de empleados "
+               f"(EmpleadosTW): {len(filas)}"])
+    ws['A1'].font = Font(bold=True, size=12)
+    ws.append(SIN_LISTADO_HEADERS)
+    for c in ws[2]:
+        c.font = Font(bold=True, color='FFFFFF')
+        c.fill = PatternFill('solid', fgColor='1E5591')
+    for f in filas:
+        ws.append([f.get(c) for c in SIN_LISTADO_HEADERS])
+    for fila in ws.iter_rows(min_row=3, min_col=10, max_col=13):
+        for c in fila:
+            if isinstance(c.value, (int, float)):
+                c.number_format = '#,##0'
+    anchos = (13, 14, 34, 14, 18, 22, 13, 13, 20, 10, 10, 14, 14, 28)
+    for i, w in enumerate(anchos, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    ws.freeze_panes = 'A3'
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def nombre_sin_listado(periodo):
+    return f"Fichas sin listado {nombre_periodo(periodo)}.xlsx"
+
+
 def imp_final(r, imp_manual=None):
     """Imponible calculado, o el manual, o 'Imp no encontrado'."""
     if r['imp'] is not None:
@@ -387,13 +514,11 @@ def cargar_tipos(equiv_fuente):
     return tipos
 
 
-def cuadratura_liquido(fuente, equiv_fuente):
+def cuadratura_liquido(fuente, equiv_fuente, avance=None):
     """Por ficha: LIQUIDO = (haberes afectos + exentos) - (desc. legales + descuentos).
     Retorna lista de dicts con los totales y la diferencia contra LIQUIDO."""
     tipos = cargar_tipos(equiv_fuente)
-    wb = _wb(fuente)
-    ws = _hoja_tw(wb)
-    it = ws.iter_rows(values_only=True)
+    _, total, it = _filas_tw(fuente)
     cab = [next(it, ()) for _ in range(FILA_ENCABEZADO)]
     hdr = [str(h).strip() if h is not None else '' for h in cab[-1]]
 
@@ -413,7 +538,8 @@ def cuadratura_liquido(fuente, equiv_fuente):
         return t
 
     filas = []
-    for r in it:
+    for k, r in enumerate(it):
+        _avisar(avance, k, total)
         if not r or i_fic >= len(r) or r[i_fic] in (None, ''):
             continue
         ha, he = suma(r, c_af, True), suma(r, c_ex)
@@ -423,7 +549,6 @@ def cuadratura_liquido(fuente, equiv_fuente):
         filas.append({'rut': normalizar_rut(r[i_rut]), 'ficha': str(r[i_fic]).strip(),
                       'ha': round(ha), 'he': round(he), 'dl': round(dl), 'de': round(de),
                       'calc': round(calc), 'liq': round(liq), 'dif': round(liq - calc)})
-    wb.close()
     return filas
 
 

@@ -8,10 +8,14 @@ Uso:
 """
 
 import io
+import math
 import re
+import threading
+import time
 import openpyxl
 import streamlit as st
 
+import excel_rapido as er
 import imp_sin_lic as isl
 
 # ─────────────────────────────────────────────────────────────────
@@ -27,7 +31,7 @@ HABERES_NEGATIVOS = {
 
 EXCLUIR_DE_EXENTOS = set()   # SOBREGIRO (compensaSobre) sí entra en rentas no gravadas
 
-SIEMPRE_GENERAR = {'impuesto', 'cesEmpleado'}
+SIEMPRE_GENERAR = {'impuesto'}   # cesEmpleado solo se genera si su monto es distinto de cero
 
 MESES_ES = {
     'ENERO': '01', 'FEBRERO': '02', 'MARZO': '03', 'ABRIL': '04',
@@ -82,15 +86,16 @@ CONCEPTOS_BASE_TOT = {'totalesEmpl'}
 #               grupo CES = min(suma haberes afectos, topeCes_pesos)
 # Con licencia: ver calcular_afectos_licencia()
 AFECTO_GRUPO_AFP_SIN_LIC = {
-    'afp', 'isapre', 'cesEmpleado', 'cajaComp', 'mutual', 'sis',
+    'afp', 'isapre', 'cajaComp', 'mutual', 'sis',
     'aporteAFPemp', 'aporteFAPPCEV', 'aporteFAPPBAC',
 }
 AFECTO_GRUPO_AFP_CON_LIC = {          # suma o (topeAFP - IMP SL SIS)
-    'afp', 'isapre', 'cesEmpleado', 'cajaComp', 'mutual', 'aporteFAPPBAC',
+    'afp', 'isapre', 'cajaComp', 'mutual', 'aporteFAPPBAC',
     'aporteAFPemp',
 }
 AFECTO_AFP_MAS_SIS = {'sis', 'aporteFAPPCEV'}     # afecto afp + IMP SL SIS
 AFECTO_GRUPO_CES = {'cesAporteCi', 'cesAporteSol'}
+AFECTO_CES_EMPLEADO = {'cesEmpleado'}            # siempre min(suma afectos, topeCes_pesos)
 
 # Con licencia, el afecto de estos conceptos se deduce del monto de TeamWork:
 #   sis, aporteFAPPCEV -> monto / (Cotización de jubilación / 100)
@@ -108,6 +113,31 @@ def afecto_desde_monto(id_concepto, monto, cotiz):
     else:
         return None
     return round(monto / tasa) if tasa > 0 else None
+
+# ── Parcial7 / Parcial8 (solo con licencia; 0 en cualquier otro caso) ─────
+# Parcial7 = IMP SIN LIC (columna agregada en la Etapa 1)
+# Parcial8: isapre       -> min(suma haberes afectos, topeImp_pesos_afp)
+#           cesAporteSol -> min(suma haberes afectos, topeCes_pesos)
+PARCIAL7_CON_LIC = {'mutual', 'isapre', 'cesAporteSol', 'aporteAFPemp', 'aporteFAPPCEV', 'sis'}
+PARCIAL8_TOPE_AFP = {'isapre'}
+PARCIAL8_TOPE_CES = {'cesAporteSol'}
+
+
+def calcular_parciales(id_concepto, dias_lic, imp_sin_lic, suma_afectos, tope_afp, tope_ces):
+    """Retorna (Parcial7, Parcial8) del concepto."""
+    if dias_lic <= 0:
+        return 0, 0
+    suma = max(suma_afectos, 0)
+    tope = lambda v, t: min(v, t) if t > 0 else v
+    p7 = imp_sin_lic if id_concepto in PARCIAL7_CON_LIC else 0
+    if id_concepto in PARCIAL8_TOPE_AFP:
+        p8 = tope(suma, tope_afp)
+    elif id_concepto in PARCIAL8_TOPE_CES:
+        p8 = tope(suma, tope_ces)
+    else:
+        p8 = 0
+    return p7, p8
+
 
 DESC_LEGAL_MANUALES = {
     'AFP', 'FONASA', 'ISAPRE', 'IMPUESTO UNICO',
@@ -168,12 +198,14 @@ def desde_agosto_2026(periodo):
 def calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp, tope_ces, imp_sl_sis):
     """Afecto de los conceptos previsionales según haya o no licencia.
 
+    Siempre (con o sin licencia):
+      cesEmpleado                   -> min(suma afectos, topeCes_pesos)
     licenciaDias = 0:
-      afp, isapre, cesEmpleado, cajaComp, mutual, sis, aporteAFPemp,
+      afp, isapre, cajaComp, mutual, sis, aporteAFPemp,
       aporteFAPPCEV, aporteFAPPBAC  -> min(suma afectos, topeImp_pesos_afp)
       cesAporteCi, cesAporteSol     -> min(suma afectos, topeCes_pesos)
     licenciaDias > 0:
-      afp, isapre, cesEmpleado, cajaComp, mutual, aporteFAPPBAC, aporteAFPemp
+      afp, isapre, cajaComp, mutual, aporteFAPPBAC, aporteAFPemp
           -> suma afectos si es <= topeImp_pesos_afp; si no, topeImp_pesos_afp - IMP SL SIS
       sis, aporteFAPPCEV            -> afecto afp + IMP SL SIS
       cesAporteCi, cesAporteSol     -> min(suma afectos + IMP SL SIS, topeCes_pesos)
@@ -181,6 +213,8 @@ def calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp, tope_ces, imp_sl
     suma = max(suma_afectos, 0)
     tope = lambda v, t: min(v, t) if t > 0 else v
     af = {}
+    for c in AFECTO_CES_EMPLEADO:
+        af[c] = tope(suma, tope_ces)
     if dias_lic <= 0:
         for c in AFECTO_GRUPO_AFP_SIN_LIC:
             af[c] = tope(suma, tope_afp)
@@ -248,13 +282,11 @@ ALIAS_EMPLEADOS = {
 }
 
 
-def cargar_empleados(file_bytes):
+def cargar_empleados(file_bytes, avance=None):
     """Lee el maestro de empleados fila a fila (streaming) y guarda solo las
     columnas que usa la app. Evita cargar el Excel completo en memoria, que
     con listados grandes (~180 mil filas x 189 columnas) colgaba la app."""
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    ws = wb.active
-    it = ws.iter_rows(values_only=True)
+    _, total, it = er.leer_hoja(file_bytes)
     next(it, None)                       # fila 1: título
     headers = [str(h).strip() if h else '' for h in (next(it, None) or [])]
     pos = {}
@@ -271,7 +303,9 @@ def cargar_empleados(file_bytes):
                 break
 
     empleados = {}
-    for row in it:
+    for k, row in enumerate(it):
+        if avance and total and k % 2000 == 0:
+            avance(min(k / total, 1.0))
         if not row or not row[0]:
             continue
         d = {c: (row[i] if i < len(row) else None) for c, i in idx.items()}
@@ -281,7 +315,6 @@ def cargar_empleados(file_bytes):
         key = str(d.get('Nombre del contrato') or '').strip()
         if key:
             empleados[key] = d
-    wb.close()
     return empleados
 
 
@@ -328,22 +361,21 @@ def cargar_asig(file_bytes):
     return asig
 
 
-def cargar_tw(file_bytes):
+def cargar_tw(file_bytes, avance=None):
     """Lee la hoja de liquidaciones de TW. No depende de la hoja activa:
     busca la hoja cuya fila 2 contiene el período ("Mes a procesar: ...")
     o cuyo encabezado incluye FICHA; si no encuentra ninguna, usa la activa."""
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    ws_elegida = None
-    for ws in wb.worksheets:
-        cab = list(ws.iter_rows(min_row=1, max_row=8, values_only=True))
-        fila2 = str(cab[1][0]) if len(cab) > 1 and cab[1] else ''
+    def es_tw(cab):
+        fila2 = str(cab[1][0]) if len(cab) > 1 and cab[1] and cab[1][0] is not None else ''
         tiene_ficha = any(r and 'FICHA' in [str(c).strip() for c in r if c] for r in cab)
-        if parsear_periodo(fila2) or tiene_ficha:
-            ws_elegida = ws
-            break
-    ws = ws_elegida or wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+        return bool(parsear_periodo(fila2) or tiene_ficha)
+
+    _, total, it = er.leer_hoja(file_bytes, es_tw)
+    rows = []
+    for k, r in enumerate(it):
+        if avance and total and k % 200 == 0:
+            avance(min(k / total, 1.0))
+        rows.append(r)
     return rows
 
 
@@ -352,10 +384,12 @@ def cargar_tw(file_bytes):
 # ─────────────────────────────────────────────────────────────────
 
 def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_bytes=None,
-             progress_callback=None, log_callback=None):
+             progress_callback=None, log_callback=None, paso_callback=None):
     """
     Ejecuta la transformación completa y retorna (output_rows, advertencias, stats).
-    progress_callback(fraccion): actualiza barra de progreso (0.0 a 1.0)
+    paso_callback(clave): avisa el inicio de cada paso
+        ('equiv', 'emp', 'refs', 'tw', 'proc')
+    progress_callback(fraccion): avance del paso en curso (0.0 a 1.0)
     log_callback(texto): emite mensajes de estado
     """
 
@@ -363,15 +397,22 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         if log_callback:
             log_callback(msg)
 
+    def paso(clave):
+        if paso_callback:
+            paso_callback(clave)
+
     # ── Cargar referencias ──────────────────────────────────────────
+    paso('equiv')
     log("Cargando Equivalencias Tw.xlsx…")
     equiv = cargar_equivalencias(equiv_bytes)
     log(f"  ✓ {len(equiv)} equivalencias")
 
+    paso('emp')
     log("Cargando empleadostw.xlsx…")
-    empleados = cargar_empleados(emp_bytes)
+    empleados = cargar_empleados(emp_bytes, progress_callback)
     log(f"  ✓ {len(empleados)} empleados")
 
+    paso('refs')
     log("Cargando parametrosMesuales.xlsx…")
     params = cargar_params(params_bytes)
     log(f"  ✓ {len(params)} períodos")
@@ -460,8 +501,9 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         return None
 
     # ── Cargar tw.xlsx ──────────────────────────────────────────────
+    paso('tw')
     log("Cargando tw.xlsx…")
-    tw_rows_all = cargar_tw(tw_bytes)
+    tw_rows_all = cargar_tw(tw_bytes, progress_callback)
 
     periodo = parsear_periodo(str(tw_rows_all[1][0]))
     if not periodo:
@@ -500,6 +542,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
     IDX_FICHA = col_idx('FICHA')
     IDX_DIAS_LIC  = col_idx('DIAS LICENCIA')
     IDX_IMP_SL_SIS = col_idx('IMP SL SIS')        # agregada en la Etapa 1
+    IDX_IMP_SIN_LIC = col_idx('IMP SIN LIC')      # agregada en la Etapa 1
     IDX_DIAS_TRAB = col_idx('DIAS TRABAJADOS')
     IDX_FONASA    = col_idx('FONASA')
     IDX_ISAPRE    = col_idx('ISAPRE')
@@ -553,6 +596,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
             return None
         return row[idx]
 
+    paso('proc')
     log("Procesando empleados…")
 
     for fila_n, row in enumerate(tw_data, start=9):
@@ -595,6 +639,15 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
 
         # Afectos previsionales según licencia (IMP SL SIS viene de la Etapa 1)
         imp_sl_sis = n(safe_val(row, IDX_IMP_SL_SIS)) if dias_lic > 0 else 0.0
+        # IMP SIN LIC = "Imp no encontrado" (texto): se reemplaza por
+        # (IMP SL SIS / min(DIAS LICENCIA, 30)) * 30
+        imp_sin_lic = 0.0
+        if dias_lic > 0:
+            v_isl = safe_val(row, IDX_IMP_SIN_LIC)
+            if isinstance(v_isl, str) and v_isl.strip() == isl.NO_ENCONTRADO:
+                imp_sin_lic = imp_sl_sis / min(dias_lic, 30) * 30
+            else:
+                imp_sin_lic = n(v_isl)
         afectos_lic = calcular_afectos_licencia(dias_lic, suma_afectos, tope_afp,
                                                 tope_ces, imp_sl_sis)
 
@@ -612,6 +665,8 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
 
         def fila(id_concepto, monto, afecto_val=0, id_inst=None, cotiz=None,
                  total_reb=0, rentas_ng=0, monto_init=0):
+            parcial7, parcial8 = calcular_parciales(id_concepto, dias_lic, imp_sin_lic,
+                                                    suma_afectos, tope_afp, tope_ces)
             output_rows.append([
                 periodo,
                 rut,
@@ -632,8 +687,8 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
                 0,
                 round(monto_init),
                 1,
-                0,
-                0,
+                round(parcial7),
+                round(parcial8),
             ])
             n_filas_gen[0] += 1
 
@@ -686,9 +741,10 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
         inst_isapre = get_institucion('isapre', emp, row, desde_ago)
         fila('isapre', monto_isapre, afectos_lic['isapre'], inst_isapre, monto_isapre)
 
-        # cesEmpleado (siempre)
-        inst_ces = get_institucion('cesEmpleado', emp, row, desde_ago)
-        fila('cesEmpleado', v_seg_ses, afectos_lic['cesEmpleado'], inst_ces, 0.6)
+        # cesEmpleado (solo si el monto es distinto de cero)
+        if round(v_seg_ses) != 0:
+            inst_ces = get_institucion('cesEmpleado', emp, row, desde_ago)
+            fila('cesEmpleado', v_seg_ses, afectos_lic['cesEmpleado'], inst_ces, 0.6)
 
         # impuesto (siempre)
         v_imp1 = n(safe_val(row, IDX_IMP1))
@@ -770,7 +826,7 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
                 fila('cajaComp', monto_ccaf, afectos_lic['cajaComp'], id_inst=id_ccaf)
 
         n_procesados += 1
-        if progress_callback and total > 0:
+        if progress_callback and total > 0 and n_procesados % 50 == 0:
             progress_callback(n_procesados / total)
 
     stats = {
@@ -782,12 +838,27 @@ def procesar(tw_bytes, equiv_bytes, emp_bytes, params_bytes, cot_bytes, asig_byt
     return output_rows, advertencias, stats
 
 
-def generar_excel(output_rows):
-    """Genera el archivo Excel en memoria y retorna bytes."""
+def generar_excel(output_rows, avance=None):
+    """Genera el archivo Excel en memoria y retorna bytes.
+    avance(fraccion): opcional. Armar las filas va de 0 a 0,4; guardar el
+    archivo no se puede medir (la barra sigue avanzando sola)."""
+    hdr = output_rows[0]
+    c_con = hdr.index('Id del concepto')
+    c_cot = hdr.index('Cotización de jubilación')
+    rapido = er.escribir_filas(
+        output_rows, 'Liquidaciones',
+        {c_cot: lambda fila: '0.00' if fila[c_con] == 'sis' else None},
+        avance)
+    if rapido is not None:
+        return rapido
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = 'Liquidaciones'
-    for row in output_rows:
+    total = len(output_rows)
+    for k, row in enumerate(output_rows):
+        if avance and k % 2000 == 0:
+            avance(0.35 * k / total)
         ws.append(row)
     # Cotización de jubilación del sis con 2 decimales
     hdr = output_rows[0]
@@ -796,6 +867,8 @@ def generar_excel(output_rows):
     for r in range(2, ws.max_row + 1):
         if ws.cell(r, c_con).value == 'sis':
             ws.cell(r, c_cot).number_format = '0.00'
+    if avance:
+        avance(0.4)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -807,6 +880,143 @@ def generar_excel(output_rows):
 # ─────────────────────────────────────────────────────────────────
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Segundos estimados por paso (solo reparten la barra de avance)
+_RAPIDO = not er.motores_rapidos()
+T = ({'emp': 2, 'mes': 1, 'entrada': 4, 'excel': 10} if _RAPIDO else
+     {'emp': 17, 'mes': 9, 'entrada': 33, 'excel': 20})
+
+
+def _version_codigo():
+    """Fecha de modificación de los .py de la app: si cambia el código, los
+    resultados guardados en la sesión se descartan (evita descargar un
+    archivo generado con la versión anterior)."""
+    import os
+    carpeta = os.path.dirname(os.path.abspath(__file__))
+    return tuple(os.path.getmtime(os.path.join(carpeta, f))
+                 for f in ('tw_to_rex_app.py', 'imp_sin_lic.py', 'excel_rapido.py')
+                 if os.path.exists(os.path.join(carpeta, f)))
+
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+except ImportError:                                   # versiones antiguas de Streamlit
+    add_script_run_ctx = get_script_run_ctx = None
+
+
+def _mmss(seg):
+    seg = int(seg)
+    return f"{seg // 60}:{seg % 60:02d}"
+
+
+class Avance:
+    """Barra de avance de un proceso con varios pasos.
+
+    pasos: lista de (clave, texto, segundos_estimados). El peso de cada paso en
+    la barra es proporcional a su tiempo estimado.
+    - paso(clave): pasa al paso indicado y deja el anterior marcado como hecho.
+    - avance(fraccion): avance real (0..1) del paso en curso.
+    Un hilo refresca la barra cada medio segundo con el tiempo transcurrido y,
+    si el paso no informa avance (abrir o guardar un Excel), la hace avanzar
+    sola de a poco, sin pasar el 95 % del paso. Así nunca parece detenida.
+    """
+
+    TOPE = 0.95
+
+    def __init__(self, pasos, contenedor=None):
+        self.pasos = pasos
+        total = sum(p[2] for p in pasos) or 1
+        self.ancho = [p[2] / total for p in pasos]
+        self.base = [sum(self.ancho[:i]) for i in range(len(pasos))]
+        self.idx = {p[0]: i for i, p in enumerate(pasos)}
+        cont = contenedor or st
+        self.lineas = cont.empty()
+        self.barra = cont.progress(0.0, text="Iniciando…")
+        self.hechos = []
+        self.i = -1
+        self.t0 = self.t_paso = self.t_sub = time.time()
+        self.sub = 0.0
+        self.mostrado = 0.0
+        self.lock = threading.Lock()
+        self.fin = threading.Event()
+        self.hilo = None
+        if add_script_run_ctx and get_script_run_ctx() is not None:
+            self.hilo = threading.Thread(target=self._latido, daemon=True)
+            add_script_run_ctx(self.hilo)
+            self.hilo.start()
+
+    # ── API ──
+    def paso(self, clave):
+        with self.lock:
+            ahora = time.time()
+            if self.i >= 0:
+                self.hechos.append(f"✅ {self.pasos[self.i][1]} · {_mmss(ahora - self.t_paso)}")
+            self.i = self.idx[clave]
+            self.t_paso = self.t_sub = ahora
+            self.sub = 0.0
+            self._pintar(lineas=True)
+
+    def avance(self, frac):
+        with self.lock:
+            frac = max(0.0, min(float(frac), 1.0))
+            if frac > self.sub:
+                self.sub, self.t_sub = frac, time.time()
+                self._pintar()
+
+    def cerrar(self, texto="Listo", limpiar=True):
+        self.fin.set()
+        if self.hilo:
+            self.hilo.join(timeout=2)
+        with self.lock:
+            if self.i >= 0:
+                self.hechos.append(f"✅ {self.pasos[self.i][1]} · {_mmss(time.time() - self.t_paso)}")
+                self.i = -1
+            if limpiar:
+                self.barra.empty()
+                self.lineas.empty()
+            else:
+                self.barra.progress(1.0, text=f"{texto} · {_mmss(time.time() - self.t0)}")
+                self._pintar_lineas()
+        return _mmss(time.time() - self.t0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.cerrar()
+        return False
+
+    # ── interno ──
+    def _latido(self):
+        while not self.fin.wait(0.5):
+            with self.lock:
+                if self.i >= 0:
+                    self._pintar()
+
+    def _fraccion_paso(self):
+        """Avance real del paso; si lleva rato sin novedades, avanza solo hacia el 95 %."""
+        esperado = max(self.pasos[self.i][2], 1)
+        quieto = time.time() - self.t_sub
+        extra = (self.TOPE - self.sub) * (1 - math.exp(-quieto / esperado))
+        return self.sub + max(extra, 0.0) if self.sub < self.TOPE else self.sub
+
+    def _pintar(self, lineas=False):
+        if self.i < 0:
+            return
+        frac = self.base[self.i] + self.ancho[self.i] * self._fraccion_paso()
+        self.mostrado = max(self.mostrado, min(frac, 0.999))     # nunca retrocede
+        texto = (f"Paso {self.i + 1} de {len(self.pasos)} · {self.pasos[self.i][1]}… "
+                 f"{self.mostrado * 100:.0f} % · ⏱ {_mmss(time.time() - self.t0)}")
+        try:
+            self.barra.progress(self.mostrado, text=texto)
+            if lineas:
+                self._pintar_lineas()
+        except Exception:                                  # la página se recargó
+            self.fin.set()
+
+    def _pintar_lineas(self):
+        actual = [f"⏳ {self.pasos[self.i][1]}…"] if self.i >= 0 else []
+        self.lineas.markdown("  \n".join(self.hechos + actual))
+
 
 ETIQUETAS = {
     'emp':    "👥 EmpleadosTW.xlsx  *(maestro de empleados)*",
@@ -833,6 +1043,9 @@ def _topes(datos):
     return isl.cargar_topes(datos)
 
 
+# Las funciones con caché no pueden tocar la barra de avance: Streamlit
+# "repite" lo que dibujan y falla si el elemento se creó fuera de ellas.
+# Por eso no reciben el callback de avance (la barra avanza sola mientras leen).
 @st.cache_data(show_spinner=False)
 def _contratos(datos):
     return isl.cargar_contratos(datos)
@@ -846,7 +1059,11 @@ def _mes(datos, haberes):
 def clasificar_meses(archivos):
     """Detecta el período de cada archivo mensual. Retorna (meses, ignorados)."""
     meses, ignorados = {}, []
-    for f in archivos:
+    barra = st.progress(0.0, text="Revisando archivos…") if len(archivos) > 1 else None
+    for k, f in enumerate(archivos):
+        if barra:
+            barra.progress(k / len(archivos),
+                           text=f"Revisando archivo {k + 1} de {len(archivos)}: {f.name}")
         if f.name.startswith('~$'):
             continue
         if isl.tipo_por_nombre(f.name) == 'salida':
@@ -859,12 +1076,18 @@ def clasificar_meses(archivos):
             meses[p] = f
         else:
             ignorados.append(f"{f.name} (no es un archivo mensual de TeamWork)")
+    if barra:
+        barra.empty()
     return meses, ignorados
 
 
 st.set_page_config(page_title="TeamWork → Rex+", page_icon="💼", layout="wide")
 st.title("💼 TeamWork → Rex+")
 st.caption("Transforma liquidaciones de TeamWork al formato de importación Rex+")
+if er.motores_rapidos():
+    st.warning("⚡ La app funcionará más lenta: falta instalar **" +
+               ", ".join(er.motores_rapidos()) + "**. En la consola ejecuta:  "
+               "`pip install python-calamine xlsxwriter`  y vuelve a iniciar la app.")
 
 # ── Carga de archivos ───────────────────────────────────────────────
 c1, c2 = st.columns(2)
@@ -893,7 +1116,8 @@ with c2:
         if f:
             refs[tipo] = f
 
-firma = (tuple(sorted((f.name, f.size) for f in (archivos_mes or []))),
+firma = (_version_codigo(),
+         tuple(sorted((f.name, f.size) for f in (archivos_mes or []))),
          tuple(sorted((t, f.name, f.size) for t, f in refs.items())), mes_proc)
 if st.session_state.get('firma') != firma:          # cambiaron los archivos
     for k in ('e1', 'e2'):
@@ -917,36 +1141,58 @@ st.caption("Calcula el imponible sin licencia y agrega las columnas **IMP SIN LI
            "**IMP SL SIS** junto a DIAS LICENCIA.")
 
 if st.button("▶️ Generar archivo de entrada", type="primary", disabled=not listo):
+    anteriores = sorted((p for p in meses if p < mes_proc), reverse=True)
+    pasos = ([('refs', "Leyendo Equivalencias y parámetros", 1),
+              ('emp', "Leyendo listado de empleados", T['emp']),
+              (mes_proc, f"Leyendo {isl.nombre_periodo(mes_proc)}", T['mes'])]
+             + [(p, f"Leyendo {isl.nombre_periodo(p)}", T['mes']) for p in anteriores]
+             + [('calc', "Calculando imponibles sin licencia", 1),
+                ('entrada', "Insertando columnas en el archivo de entrada", T['entrada']),
+                ('cuad', "Validando cuadratura del líquido", T['mes']),
+                ('desc', "Preparando descargas", 3)])
+    stt = st.status("Etapa 1 en curso…", expanded=True)
+    av = Avance(pasos, stt)
     try:
-        with st.status("Etapa 1 en curso…", expanded=True) as stt:
-            st.write("Leyendo referencias…")
-            haberes   = _haberes(refs['equiv'].getvalue())
-            topes     = _topes(refs['params'].getvalue())
-            contratos = _contratos(refs['emp'].getvalue())
-            st.write(f"Leyendo {isl.nombre_periodo(mes_proc)}…")
-            actual = _mes(meses[mes_proc].getvalue(), haberes)
-            previos = []
-            for p in sorted((p for p in meses if p < mes_proc), reverse=True):
-                st.write(f"Leyendo {isl.nombre_periodo(p)}…")
-                previos.append(_mes(meses[p].getvalue(), haberes))
-            sin_listado = [(f, d['rut']) for f, d in actual['fichas'].items()
-                           if f not in contratos]
-            st.write("Calculando imponibles sin licencia…")
-            resultados, adv = isl.calcular(actual, previos, topes, contratos)
-            st.write("Insertando columnas…")
-            mes_bytes = meses[mes_proc].getvalue()
-            entrada = isl.generar_entrada_con_columna(mes_bytes, resultados)
-            st.write("Validando cuadratura del líquido…")
-            cuadratura = isl.cuadratura_liquido(entrada, refs['equiv'].getvalue())
-            stt.update(label="Etapa 1 lista", state="complete", expanded=False)
+        av.paso('refs')
+        haberes   = _haberes(refs['equiv'].getvalue())
+        topes     = _topes(refs['params'].getvalue())
+        av.paso('emp')
+        contratos = _contratos(refs['emp'].getvalue())
+        av.paso(mes_proc)
+        actual = _mes(meses[mes_proc].getvalue(), haberes)
+        previos = []
+        for p in anteriores:
+            av.paso(p)
+            previos.append(_mes(meses[p].getvalue(), haberes))
+        sin_listado = [(f, d['rut']) for f, d in actual['fichas'].items()
+                       if f not in contratos]
+        av.paso('calc')
+        resultados, adv = isl.calcular(actual, previos, topes, contratos)
+        av.paso('entrada')
+        mes_bytes = meses[mes_proc].getvalue()
+        entrada = isl.generar_entrada_con_columna(mes_bytes, resultados, avance=av.avance)
+        av.paso('cuad')
+        cuadratura = isl.cuadratura_liquido(entrada, refs['equiv'].getvalue(), av.avance)
+        av.paso('desc')
+        informe = isl.generar_informe(resultados)
+        sin_lst_xlsx = None
+        if sin_listado:
+            detalle_sin = isl.sin_listado(meses[mes_proc].getvalue(), contratos)
+            sin_lst_xlsx = isl.generar_informe_sin_listado(detalle_sin, mes_proc)
+        cuad_xlsx = isl.generar_cuadratura(cuadratura, mes_proc) if cuadratura else None
+        dur = av.cerrar("Etapa 1 lista", limpiar=False)
+        stt.update(label=f"✅ Etapa 1 lista en {dur}", state="complete", expanded=False)
         st.session_state['e1'] = {
             'periodo': mes_proc, 'mes_bytes': mes_bytes, 'resultados': resultados,
             'advertencias': [a for a in adv if 'no encontrada en el listado' not in a],
             'sin_listado': sin_listado, 'n_fichas': len(actual['fichas']),
             'entrada': entrada, 'manuales': 0, 'cuadratura': cuadratura,
+            'informe': informe, 'cuad_xlsx': cuad_xlsx, 'sin_lst_xlsx': sin_lst_xlsx,
         }
         st.session_state.pop('e2', None)
     except Exception as e:
+        av.cerrar(limpiar=False)
+        stt.update(label="❌ Etapa 1 con error", state="error", expanded=True)
         st.error(f"❌ Error en la Etapa 1: {e}")
         import traceback
         with st.expander("Detalle del error"):
@@ -966,6 +1212,9 @@ if e1:
         with st.expander(f"Ver fichas que no están en el listado ({len(sin_listado)})"):
             st.dataframe([{'FICHA': f, 'RUT': r} for f, r in sin_listado],
                          hide_index=True, width='stretch')
+        if e1.get('sin_lst_xlsx'):
+            st.download_button(f"⬇️ {isl.nombre_sin_listado(e1['periodo'])}", e1['sin_lst_xlsx'],
+                               file_name=isl.nombre_sin_listado(e1['periodo']), mime=XLSX_MIME)
     else:
         st.caption(f"✅ Las {e1['n_fichas']:,} fichas del mes están en el listado de empleados."
                    .replace(',', '.'))
@@ -1010,9 +1259,13 @@ if e1:
                       if f.get('IMPONIBLE') not in (None, '')}
             if st.button(f"💾 Aplicar imponibles ingresados ({len(manual)})",
                          disabled=not manual):
-                with st.spinner("Actualizando archivo de entrada…"):
+                with Avance([('entrada', "Actualizando archivo de entrada", T['entrada']),
+                             ('desc', "Actualizando informe", 1)]) as av:
+                    av.paso('entrada')
                     e1['entrada'] = isl.generar_entrada_con_columna(
-                        e1['mes_bytes'], res, manual)
+                        e1['mes_bytes'], res, manual, av.avance)
+                    av.paso('desc')
+                    e1['informe'] = isl.generar_informe(res, manual)
                     e1['manuales'] = len(manual)
                     e1['manual'] = manual
                 st.session_state.pop('e2', None)
@@ -1023,12 +1276,14 @@ if e1:
     d1, d2, d3 = st.columns(3)
     d1.download_button(f"⬇️ {isl.nombre_entrada(e1['periodo'])}", e1['entrada'],
                        file_name=isl.nombre_entrada(e1['periodo']), mime=XLSX_MIME)
-    d2.download_button(f"⬇️ {isl.nombre_informe(e1['periodo'])}",
-                       isl.generar_informe(res, e1.get('manual')),
+    if 'informe' not in e1:                       # sesión iniciada con una versión anterior
+        e1['informe'] = isl.generar_informe(res, e1.get('manual'))
+    d2.download_button(f"⬇️ {isl.nombre_informe(e1['periodo'])}", e1['informe'],
                        file_name=isl.nombre_informe(e1['periodo']), mime=XLSX_MIME)
-    if cuad:
-        d3.download_button(f"⬇️ {isl.nombre_cuadratura(e1['periodo'])}",
-                           isl.generar_cuadratura(cuad, e1['periodo']),
+    if cuad and 'cuad_xlsx' not in e1:
+        e1['cuad_xlsx'] = isl.generar_cuadratura(cuad, e1['periodo'])
+    if e1.get('cuad_xlsx'):
+        d3.download_button(f"⬇️ {isl.nombre_cuadratura(e1['periodo'])}", e1['cuad_xlsx'],
                            file_name=isl.nombre_cuadratura(e1['periodo']), mime=XLSX_MIME)
 
 st.divider()
@@ -1038,16 +1293,17 @@ st.subheader("2️⃣ Etapa 2 — Archivo de salida Rex+")
 st.caption("Transforma el archivo de entrada de la Etapa 1 al formato de importación Rex+.")
 
 if st.button("▶️ Generar archivo de salida", type="primary", disabled=not e1):
-    log_lines = []
-    log_box   = st.empty()
-    prog_bar  = st.progress(0.0, text="Iniciando…")
+    stt = st.status("Etapa 2 en curso…", expanded=True)
+    av = Avance([('equiv', "Leyendo Equivalencias", 1),
+                 ('emp', "Leyendo listado de empleados", T['emp']),
+                 ('refs', "Leyendo parámetros y cotizaciones AFP", 1),
+                 ('tw', "Leyendo archivo de entrada", T['mes']),
+                 ('proc', "Procesando empleados", 2),
+                 ('excel', "Generando el Excel de salida", T['excel'])], stt)
+    log_box = stt.empty()
 
     def log_callback(msg):
-        log_lines.append(msg)
-        log_box.code('\n'.join(log_lines[-30:]))
-
-    def progress_callback(frac):
-        prog_bar.progress(min(frac, 1.0), text=f"Procesando empleados… {frac*100:.1f}%")
+        log_box.caption(msg.strip())
 
     try:
         output_rows, advertencias, stats = procesar(
@@ -1057,18 +1313,20 @@ if st.button("▶️ Generar archivo de salida", type="primary", disabled=not e1
             params_bytes = refs['params'].getvalue(),
             cot_bytes    = refs['cot'].getvalue(),
             asig_bytes   = refs['asig'].getvalue() if 'asig' in refs else None,
-            progress_callback = progress_callback,
+            progress_callback = av.avance,
             log_callback      = log_callback,
+            paso_callback     = av.paso,
         )
-        prog_bar.progress(1.0, text="Generando archivo de salida…")
+        av.paso('excel')
+        excel = generar_excel(output_rows, av.avance)
+        dur = av.cerrar("Etapa 2 lista", limpiar=False)
+        stt.update(label=f"✅ Etapa 2 lista en {dur}", state="complete", expanded=False)
         st.session_state['e2'] = {
-            'excel': generar_excel(output_rows), 'stats': stats,
-            'advertencias': advertencias,
+            'excel': excel, 'stats': stats, 'advertencias': advertencias,
         }
-        prog_bar.empty()
-        log_box.empty()
     except Exception as e:
-        prog_bar.empty()
+        av.cerrar(limpiar=False)
+        stt.update(label="❌ Etapa 2 con error", state="error", expanded=True)
         st.error(f"❌ Error en la Etapa 2: {e}")
         import traceback
         with st.expander("Detalle del error"):

@@ -5,8 +5,12 @@ App Streamlit que transforma el archivo de liquidaciones de **TeamWork** al form
 ## Requisitos
 
 ```bash
-pip install streamlit openpyxl
+pip install -r requirements.txt
 ```
+
+`python-calamine` (lectura) y `xlsxwriter` (escritura) hacen la app unas 5 veces más rápida. Si faltan, la app funciona igual con openpyxl, pero más lenta, y lo avisa en pantalla.
+
+Si cambias el código, detén la app (Ctrl+C) y vuelve a iniciarla; los resultados de una sesión anterior se descartan solos al detectar el cambio.
 
 ## Uso
 
@@ -30,6 +34,8 @@ Luego abre el navegador en `http://localhost:8501` y sigue las instrucciones de 
    "Imp no encontrado" e IMP SL SIS = (Sueldo Base del listado de empleados / 30) × DIAS LICENCIA (máx. 30).
    Descargas: `<MES AAAA> IMP SIN LIC.xlsx` e informe `ImpSinLic <MES AAAA>.xlsx` (RUT, FICHA, CONTRATO, SUELDO CONTRATO, DIAS LICENCIA, ULT IMP SIN LIC, IMP IMP SIS).
 3. **Etapa 2 — Archivo de salida:** transforma el archivo de la Etapa 1 al formato Rex+.
+
+Cada etapa muestra una barra de avance por pasos (paso actual, % y tiempo transcurrido) y la lista de pasos terminados con su duración. En los pasos que no se pueden medir (abrir o guardar un Excel) la barra sigue avanzando sola hasta el 95 % del paso.
 
 ## Archivos necesarios
 
