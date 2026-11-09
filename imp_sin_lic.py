@@ -42,6 +42,29 @@ COL_SIS        = 'IMP SL SIS'
 NO_ENCONTRADO  = 'Imp no encontrado'
 FILA_ENCABEZADO = 8          # en el archivo mensual de TW
 
+# Nombres alternativos de columnas clave según la empresa de TW
+# (TWEST usa el primero; TWRRHH usa los alias).
+ALIAS_COLUMNAS = {
+    'DIAS LICENCIA': ('DIAS LICENCIA', 'DIAS LICENCIA MEDICA', 'DÍAS LICENCIA',
+                      'DÍAS LICENCIA MÉDICA'),
+    'LIQUIDO': ('LIQUIDO', 'LIQUIDO A PAGO', 'LÍQUIDO', 'LÍQUIDO A PAGO'),
+    'FICHA': ('FICHA',),
+    'RUT': ('RUT',),
+}
+
+
+def col_clave(hdr, clave, obligatoria=True):
+    """Índice de la columna `clave` en hdr, probando sus alias.
+    Si no está y es obligatoria, lanza un ValueError con un mensaje claro."""
+    for alias in ALIAS_COLUMNAS.get(clave, (clave,)):
+        if alias in hdr:
+            return hdr.index(alias)
+    if not obligatoria:
+        return None
+    raise ValueError(
+        f"El archivo mensual no tiene la columna '{clave}' en la fila "
+        f"{FILA_ENCABEZADO} (se buscó: {', '.join(ALIAS_COLUMNAS.get(clave, (clave,)))}).")
+
 # Haberes afectos que TeamWork resta de la base imponible
 HABERES_NEGATIVOS = {
     'DESCTO. HORAS ATRASO',
@@ -205,7 +228,8 @@ def leer_mes(fuente, haberes_afectos, avance=None):
     cab = [next(it, ()) for _ in range(FILA_ENCABEZADO)]
     periodo = parsear_periodo(cab[1][0] if cab[1] else '')
     hdr = [str(h).strip() if h is not None else '' for h in cab[-1]]
-    i_fic, i_rut, i_lic = hdr.index('FICHA'), hdr.index('RUT'), hdr.index(COL_DIAS_LIC)
+    i_fic, i_rut = col_clave(hdr, 'FICHA'), col_clave(hdr, 'RUT')
+    i_lic = col_clave(hdr, COL_DIAS_LIC)
     afectos = [(i, c) for i, c in enumerate(hdr) if c in haberes_afectos]
 
     fichas = {}
@@ -299,9 +323,10 @@ def _entrada_rapida(fuente, por_ficha, imp_manual, avance=None):
     if len(filas) < FILA_ENCABEZADO:
         return None
     hdr = [str(h).strip() if h is not None else '' for h in filas[FILA_ENCABEZADO - 1]]
-    if COL_DIAS_LIC not in hdr or 'FICHA' not in hdr:
+    i_lic = col_clave(hdr, COL_DIAS_LIC, obligatoria=False)
+    i_fic = col_clave(hdr, 'FICHA', obligatoria=False)
+    if i_lic is None or i_fic is None:
         return None
-    i_lic, i_fic = hdr.index(COL_DIAS_LIC), hdr.index('FICHA')
     valores = {}
     for nfila, r in enumerate(filas[FILA_ENCABEZADO:], start=FILA_ENCABEZADO + 1):
         ficha = r[i_fic] if i_fic < len(r) else None
@@ -341,8 +366,8 @@ def generar_entrada_con_columna(fuente, resultados, imp_manual=None, avance=None
     ws = _hoja_tw(wb)
     hdr = [str(c.value).strip() if c.value is not None else ''
            for c in ws[FILA_ENCABEZADO]]
-    col_lic = hdr.index(COL_DIAS_LIC) + 1          # 1-based
-    col_fic = hdr.index('FICHA') + 1
+    col_lic = col_clave(hdr, COL_DIAS_LIC) + 1     # 1-based
+    col_fic = col_clave(hdr, 'FICHA') + 1
     col_imp, col_sis = col_lic + 1, col_lic + 2
 
     ws.insert_cols(col_imp, amount=2)
@@ -528,7 +553,8 @@ def cuadratura_liquido(fuente, equiv_fuente, avance=None):
     c_af = cols('Haber afecto') + [(i, c) for i, c in enumerate(hdr)
                                    if c in HABERES_AFECTOS_EXTRA and tipos.get(c) != 'Haber afecto']
     c_ex, c_dl, c_de = cols('Haber exento'), cols('Descuento Legal'), cols('Descuento')
-    i_fic, i_rut, i_liq = hdr.index('FICHA'), hdr.index('RUT'), hdr.index('LIQUIDO')
+    i_fic, i_rut = col_clave(hdr, 'FICHA'), col_clave(hdr, 'RUT')
+    i_liq = col_clave(hdr, 'LIQUIDO')
 
     def suma(r, cs, negativos=False):
         t = 0.0
