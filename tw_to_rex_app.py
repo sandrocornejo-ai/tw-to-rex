@@ -365,12 +365,9 @@ def cargar_tw(file_bytes, avance=None):
     """Lee la hoja de liquidaciones de TW. No depende de la hoja activa:
     busca la hoja cuya fila 2 contiene el período ("Mes a procesar: ...")
     o cuyo encabezado incluye FICHA; si no encuentra ninguna, usa la activa."""
-    def es_tw(cab):
-        fila2 = str(cab[1][0]) if len(cab) > 1 and cab[1] and cab[1][0] is not None else ''
-        tiene_ficha = any(r and 'FICHA' in [str(c).strip() for c in r if c] for r in cab)
-        return bool(parsear_periodo(fila2) or tiene_ficha)
-
-    _, total, it = er.leer_hoja(file_bytes, es_tw)
+    # Mismo criterio que la Etapa 1: período en la fila 2 o FICHA en la fila 8
+    # (no en cualquier fila: hojas auxiliares con FICHA en la fila 1 no cuentan).
+    _, total, it = er.leer_hoja(file_bytes, isl._es_hoja_tw)
     rows = []
     for k, r in enumerate(it):
         if avance and total and k % 200 == 0:
